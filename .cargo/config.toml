@@ -1,0 +1,6 @@
+[target.mips-unknown-linux-musl]
+linker = "/home/anon/https_dns_proxy_rust/toolchains/mips-linux-musl-cross/bin/mips-linux-musl-gcc"
+rustflags = ["-C", "strip=symbols"]
+
+[build]
+target = "mips-unknown-linux-musl"

@@ -3,12 +3,15 @@ use std::net::{SocketAddr, IpAddr};
 use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use reqwest::{Client, Url};
+use reqwest::{Client, Url, Proxy};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{info, error, debug, Level};
 use tracing_subscriber::FmtSubscriber;
 use trust_dns_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, Protocol};
 use trust_dns_resolver::TokioAsyncResolver;
+use std::time::Duration;
+use nix::unistd::{User, Group, setuid, setgid};
 
 #[derive(Parser, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +32,30 @@ struct Args {
     #[arg(short = 'b', long)]
     bootstrap_dns: Option<String>,
 
+    /// Bootstrap DNS polling interval in seconds
+    #[arg(long, default_value_t = 120)]
+    bootstrap_interval: u64,
+
+    /// Proxy URL (e.g., socks5://127.0.0.1:9050 or http://127.0.0.1:8080)
+    #[arg(long)]
+    proxy_url: Option<String>,
+
+    /// Connection timeout in seconds
+    #[arg(long, default_value_t = 10)]
+    connect_timeout: u64,
+
+    /// Idle timeout in seconds (keep-alive)
+    #[arg(long, default_value_t = 90)]
+    idle_timeout: u64,
+
+    /// Drop privileges to this user
+    #[arg(short = 'u', long)]
+    user: Option<String>,
+
+    /// Drop privileges to this group
+    #[arg(short = 'g', long)]
+    group: Option<String>,
+
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -45,18 +72,69 @@ async fn main() -> Result<()> {
 
     let resolver_url_parsed = Url::parse(&args.resolver_url)
         .context("Failed to parse resolver URL")?;
-    
-    let client = create_client(&args, &resolver_url_parsed).await?;
-    let resolver_url_str = Arc::new(args.resolver_url.clone());
+    let resolver_domain = resolver_url_parsed.domain().context("Resolver URL must have a domain")?.to_string();
 
+    // Bind sockets BEFORE dropping privileges
     let udp_socket = Arc::new(UdpSocket::bind(addr).await.context("Failed to bind UDP socket")?);
     let tcp_listener = TcpListener::bind(addr).await.context("Failed to bind TCP listener")?;
 
     info!("Listening on UDP/TCP {} -> {}", addr, args.resolver_url);
 
+    // Drop privileges if requested
+    if args.user.is_some() || args.group.is_some() {
+        drop_privileges(&args.user, &args.group)?;
+    }
+
+    // Initial Client Setup
+    let client = if let Some(bootstrap_dns) = &args.bootstrap_dns {
+        let ip = resolve_bootstrap(&resolver_domain, bootstrap_dns).await?;
+        info!("Bootstrapped {} to {}", resolver_domain, ip);
+        create_client(&args, Some((resolver_domain.clone(), ip)))?
+    } else {
+        create_client(&args, None)?
+    };
+
+    let shared_client = Arc::new(RwLock::new(client));
+    let resolver_url_str = Arc::new(args.resolver_url.clone());
+
+    // Spawn Bootstrap Loop if needed
+    if let Some(bootstrap_dns) = args.bootstrap_dns.clone() {
+        let shared_client = shared_client.clone();
+        let args = args.clone();
+        let domain = resolver_domain.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(args.bootstrap_interval));
+            loop {
+                interval.tick().await;
+                match resolve_bootstrap(&domain, &bootstrap_dns).await {
+                    Ok(new_ip) => {
+                        debug!("Refreshed bootstrap IP for {}: {}", domain, new_ip);
+                        // We could optimize by checking if IP changed, but creating a client is relatively cheap occasionally.
+                        // Actually, checking is better to preserve connection pools.
+                        // For simplicity/robustness of this snippet, we'll just rebuild if we want strict correctness, 
+                        // but let's check if we can easily peek. 
+                        // Since we can't easily peek inside the client's resolve map, we'll unconditionally update 
+                        // or maybe store the last IP in this loop?
+                        // Let's store last_ip.
+                        // Note: To really do this right we'd need to track state. 
+                        // For now, let's just rebuild.
+                        match create_client(&args, Some((domain.clone(), new_ip))) {
+                            Ok(new_client) => {
+                                let mut w = shared_client.write().await;
+                                *w = new_client;
+                            }
+                            Err(e) => error!("Failed to create client during bootstrap refresh: {}", e),
+                        }
+                    }
+                    Err(e) => error!("Failed to refresh bootstrap IP: {}", e),
+                }
+            }
+        });
+    }
+
     let udp_loop = {
         let socket = udp_socket.clone();
-        let client = client.clone();
+        let shared_client = shared_client.clone();
         let resolver_url = resolver_url_str.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
@@ -65,9 +143,14 @@ async fn main() -> Result<()> {
                     Ok((len, peer)) => {
                         let data = buf[..len].to_vec();
                         let socket = socket.clone();
-                        let client = client.clone();
+                        let shared_client = shared_client.clone();
                         let resolver_url = resolver_url.clone();
                         tokio::spawn(async move {
+                            // Acquire read lock to get the current client
+                            let client = {
+                                let r = shared_client.read().await;
+                                r.clone()
+                            };
                             if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer).await {
                                 debug!("Error handling UDP query from {}: {}", peer, e);
                             }
@@ -80,15 +163,19 @@ async fn main() -> Result<()> {
     };
 
     let tcp_loop = {
-        let client = client.clone();
+        let shared_client = shared_client.clone();
         let resolver_url = resolver_url_str.clone();
         tokio::spawn(async move {
             loop {
                 match tcp_listener.accept().await {
                     Ok((mut stream, peer)) => {
-                        let client = client.clone();
+                        let shared_client = shared_client.clone();
                         let resolver_url = resolver_url.clone();
                         tokio::spawn(async move {
+                            let client = {
+                                let r = shared_client.read().await;
+                                r.clone()
+                            };
                             if let Err(e) = handle_tcp_query(&mut stream, client, resolver_url).await {
                                 debug!("Error handling TCP query from {}: {}", peer, e);
                             }
@@ -123,61 +210,81 @@ fn setup_logging(verbosity: u8) {
         .expect("setting default subscriber failed");
 }
 
-async fn create_client(args: &Args, url: &Url) -> Result<Client> {
-    let mut client_builder = Client::builder()
-        .use_rustls_tls();
+fn drop_privileges(user_name: &Option<String>, group_name: &Option<String>) -> Result<()> {
+    if let Some(group) = group_name {
+        let g = Group::from_name(group)?
+            .ok_or_else(|| anyhow::anyhow!("Group {} not found", group))?;
+        setgid(g.gid).context("Failed to set gid")?;
+        info!("Dropped privileges to group {}", group);
+    }
+    if let Some(user) = user_name {
+        let u = User::from_name(user)?
+            .ok_or_else(|| anyhow::anyhow!("User {} not found", user))?;
+        setuid(u.uid).context("Failed to set uid")?;
+        info!("Dropped privileges to user {}", user);
+    }
+    Ok(())
+}
 
-    if let Some(bootstrap_servers) = &args.bootstrap_dns {
-        if let Some(domain) = url.domain() {
-            info!("Bootstrapping {} using servers: {}", domain, bootstrap_servers);
-            
-            let servers: Vec<SocketAddr> = bootstrap_servers
-                .split(',')
-                .map(|s| {
-                    let s = s.trim();
-                    if let Ok(ip) = s.parse::<IpAddr>() {
-                        SocketAddr::new(ip, 53)
-                    } else {
-                        s.parse().unwrap_or_else(|_| panic!("Invalid bootstrap address: {}", s))
-                    }
-                })
-                .collect();
-
-            let mut config = ResolverConfig::new();
-            for s in servers {
-                config.add_name_server(NameServerConfig {
-                    socket_addr: s,
-                    protocol: Protocol::Udp,
-                    tls_dns_name: None,
-                    trust_negative_responses: false,
-                    bind_addr: None,
-                });
-                config.add_name_server(NameServerConfig {
-                    socket_addr: s,
-                    protocol: Protocol::Tcp,
-                    tls_dns_name: None,
-                    trust_negative_responses: false,
-                    bind_addr: None,
-                });
+async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str) -> Result<SocketAddr> {
+    let servers: Vec<SocketAddr> = bootstrap_dns
+        .split(',')
+        .map(|s| {
+            let s = s.trim();
+            if let Ok(ip) = s.parse::<IpAddr>() {
+                SocketAddr::new(ip, 53)
+            } else {
+                s.parse().unwrap_or_else(|_| panic!("Invalid bootstrap address: {}", s))
             }
+        })
+        .collect();
 
-            let resolver = TokioAsyncResolver::tokio(config, ResolverOpts::default());
-            
-            let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider hostname using bootstrap servers")?;
-            
-            let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(ip, 443)).collect();
-            
-            if addrs.is_empty() {
-                return Err(anyhow::anyhow!("No IPs resolved for bootstrap domain"));
-            }
-
-            info!("Resolved {} to {:?}", domain, addrs);
-            client_builder = client_builder.resolve(domain, addrs[0]);
-        }
+    let mut config = ResolverConfig::new();
+    for s in servers {
+        config.add_name_server(NameServerConfig {
+            socket_addr: s,
+            protocol: Protocol::Udp,
+            tls_dns_name: None,
+            trust_negative_responses: false,
+            bind_addr: None,
+        });
+        // Also add TCP
+        config.add_name_server(NameServerConfig {
+            socket_addr: s,
+            protocol: Protocol::Tcp,
+            tls_dns_name: None,
+            trust_negative_responses: false,
+            bind_addr: None,
+        });
     }
 
-    Ok(client_builder.build()?)
+    let resolver = TokioAsyncResolver::tokio(config, ResolverOpts::default());
+    let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider hostname")?;
+    
+    // Naively pick the first one. A better implementation might round-robin or test them.
+    let ip = ips.iter().next().ok_or_else(|| anyhow::anyhow!("No IPs returned"))?;
+    
+    Ok(SocketAddr::new(ip, 443))
 }
+
+fn create_client(args: &Args, resolve_override: Option<(String, SocketAddr)>) -> Result<Client> {
+    let mut builder = Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(Duration::from_secs(args.connect_timeout))
+        .pool_idle_timeout(Duration::from_secs(args.idle_timeout));
+
+    if let Some(proxy_url) = &args.proxy_url {
+        let proxy = Proxy::all(proxy_url).context("Failed to parse proxy URL")?;
+        builder = builder.proxy(proxy);
+    }
+
+    if let Some((domain, addr)) = resolve_override {
+        builder = builder.resolve(&domain, addr);
+    }
+
+    Ok(builder.build()?)
+}
+
 
 async fn handle_udp_query(
     socket: Arc<UdpSocket>,
