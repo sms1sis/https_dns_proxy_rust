@@ -5,66 +5,145 @@ use tokio::net::{UdpSocket, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url, Proxy};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{info, error, debug, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{prelude::*};
 use trust_dns_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, Protocol};
 use trust_dns_resolver::TokioAsyncResolver;
 use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 use nix::unistd::{User, Group, setuid, setgid};
+use daemonize::Daemonize;
+use std::fs::File;
+use std::io::Read;
+
+struct Stats {
+    queries_udp: AtomicU64,
+    queries_tcp: AtomicU64,
+    errors: AtomicU64,
+}
+
+lazy_static::lazy_static! {
+    static ref STATS: Stats = Stats {
+        queries_udp: AtomicU64::new(0),
+        queries_tcp: AtomicU64::new(0),
+        errors: AtomicU64::new(0),
+    };
+}
 
 #[derive(Parser, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Listen address
+    /// Local IPv4/v6 address to bind to
     #[arg(short = 'a', long, default_value = "127.0.0.1")]
     listen_addr: String,
 
-    /// Listen port
+    /// Local port to bind to
     #[arg(short = 'p', long, default_value_t = 5053)]
     listen_port: u16,
 
-    /// Resolver URL (DoH endpoint)
-    #[arg(short, long, default_value = "https://dns.google/dns-query")]
+    /// Number of TCP clients to serve
+    #[arg(short = 'T', long, default_value_t = 20)]
+    tcp_client_limit: usize,
+
+    /// Comma-separated IPv4/v6 addresses and ports (addr:port) of DNS servers to resolve resolver host
+    #[arg(short = 'b', long, default_value = "8.8.8.8,1.1.1.1,8.8.4.4,1.0.0.1,145.100.185.15,145.100.185.16,185.49.141.37")]
+    bootstrap_dns: String,
+
+    /// Optional polling interval of DNS servers
+    #[arg(short = 'i', long, default_value_t = 120)]
+    polling_interval: u64,
+
+    /// Force IPv4 hostnames for DNS resolvers
+    #[arg(short = '4', long)]
+    force_ipv4: bool,
+
+    /// The HTTPS path to the resolver URL
+    #[arg(short = 'r', long, default_value = "https://dns.google/dns-query")]
     resolver_url: String,
 
-    /// Bootstrap DNS servers (comma-separated IPs)
-    #[arg(short = 'b', long)]
-    bootstrap_dns: Option<String>,
+    /// Optional HTTP proxy (e.g., socks5://127.0.0.1:1080)
+    #[arg(short = 't', long)]
+    proxy_server: Option<String>,
 
-    /// Bootstrap DNS polling interval in seconds
-    #[arg(long, default_value_t = 120)]
-    bootstrap_interval: u64,
+    /// Source IPv4/v6 address for outbound HTTPS connections
+    #[arg(short = 'S', long)]
+    source_addr: Option<String>,
 
-    /// Proxy URL (e.g., socks5://127.0.0.1:9050 or http://127.0.0.1:8080)
-    #[arg(long)]
-    proxy_url: Option<String>,
+    /// Use HTTP/1.1 instead of HTTP/2
+    #[arg(short = 'x', long)]
+    http11: bool,
 
-    /// Connection timeout in seconds
-    #[arg(long, default_value_t = 10)]
-    connect_timeout: u64,
+    /// Use HTTP/3 (QUIC) only
+    #[arg(short = 'q', long)]
+    http3: bool,
 
-    /// Idle timeout in seconds (keep-alive)
-    #[arg(long, default_value_t = 90)]
-    idle_timeout: u64,
+    /// Maximum idle time in seconds allowed for reusing a HTTPS connection
+    #[arg(short = 'm', long, default_value_t = 118)]
+    max_idle_time: u64,
 
-    /// Drop privileges to this user
+    /// Time in seconds to tolerate connection timeouts of reused connections
+    #[arg(short = 'L', long, default_value_t = 15)]
+    conn_loss_time: u64,
+
+    /// Optional file containing CA certificates
+    #[arg(short = 'C', long)]
+    ca_path: Option<String>,
+
+    /// Optional DSCP codepoint to set on upstream HTTPS server connections
+    #[arg(short = 'c', long)]
+    dscp_codepoint: Option<u8>,
+
+    /// Daemonize
+    #[arg(short = 'd', long)]
+    daemonize: bool,
+
+    /// Optional user to drop to if launched as root
     #[arg(short = 'u', long)]
     user: Option<String>,
 
-    /// Drop privileges to this group
+    /// Optional group to drop to if launched as root
     #[arg(short = 'g', long)]
     group: Option<String>,
 
-    /// Verbosity level (-v, -vv, -vvv)
-    #[arg(short, long, action = clap::ArgAction::Count)]
+    /// Increase logging verbosity
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Path to file to log to
+    #[arg(short = 'l', long)]
+    logfile: Option<String>,
+
+    /// Optional statistic printout interval
+    #[arg(short = 's', long, default_value_t = 0)]
+    statistic_interval: u64,
+
+    /// Flight recorder: storing desired amount of logs in memory
+    #[arg(short = 'F', long, default_value_t = 0)]
+    log_limit: usize,
+
+    /// Print versions and exit
+    #[arg(short = 'V', long)]
+    print_version: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    setup_logging(args.verbose);
+
+    if args.print_version {
+        println!("https_dns_proxy_rust {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    setup_logging(args.verbose, &args.logfile);
+
+    if args.daemonize {
+        let daemonize = Daemonize::new()
+            .working_directory("/tmp")
+            .umask(0o022);
+        daemonize.start().context("Failed to daemonize")?;
+    }
 
     let addr: SocketAddr = format!("{}:{}", args.listen_addr, args.listen_port)
         .parse()
@@ -86,38 +165,27 @@ async fn main() -> Result<()> {
     }
 
     // Initial Client Setup
-    let client = if let Some(bootstrap_dns) = &args.bootstrap_dns {
-        let ip = resolve_bootstrap(&resolver_domain, bootstrap_dns).await?;
-        info!("Bootstrapped {} to {}", resolver_domain, ip);
-        create_client(&args, Some((resolver_domain.clone(), ip)))?
-    } else {
-        create_client(&args, None)?
-    };
+    let ip = resolve_bootstrap(&resolver_domain, &args.bootstrap_dns, args.force_ipv4).await?;
+    info!("Bootstrapped {} to {}", resolver_domain, ip);
+    let client = create_client(&args, Some((resolver_domain.clone(), ip)))?;
 
     let shared_client = Arc::new(RwLock::new(client));
     let resolver_url_str = Arc::new(args.resolver_url.clone());
 
-    // Spawn Bootstrap Loop if needed
-    if let Some(bootstrap_dns) = args.bootstrap_dns.clone() {
+    // Spawn Bootstrap Loop
+    {
         let shared_client = shared_client.clone();
         let args = args.clone();
         let domain = resolver_domain.clone();
+        let bootstrap_dns = args.bootstrap_dns.clone();
+        let force_ipv4 = args.force_ipv4;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(args.bootstrap_interval));
+            let mut interval = tokio::time::interval(Duration::from_secs(args.polling_interval));
             loop {
                 interval.tick().await;
-                match resolve_bootstrap(&domain, &bootstrap_dns).await {
+                match resolve_bootstrap(&domain, &bootstrap_dns, force_ipv4).await {
                     Ok(new_ip) => {
                         debug!("Refreshed bootstrap IP for {}: {}", domain, new_ip);
-                        // We could optimize by checking if IP changed, but creating a client is relatively cheap occasionally.
-                        // Actually, checking is better to preserve connection pools.
-                        // For simplicity/robustness of this snippet, we'll just rebuild if we want strict correctness, 
-                        // but let's check if we can easily peek. 
-                        // Since we can't easily peek inside the client's resolve map, we'll unconditionally update 
-                        // or maybe store the last IP in this loop?
-                        // Let's store last_ip.
-                        // Note: To really do this right we'd need to track state. 
-                        // For now, let's just rebuild.
                         match create_client(&args, Some((domain.clone(), new_ip))) {
                             Ok(new_client) => {
                                 let mut w = shared_client.write().await;
@@ -131,6 +199,22 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // Spawn Statistics Loop
+    if args.statistic_interval > 0 {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(args.statistic_interval));
+            loop {
+                interval.tick().await;
+                let udp = STATS.queries_udp.load(Ordering::Relaxed);
+                let tcp = STATS.queries_tcp.load(Ordering::Relaxed);
+                let err = STATS.errors.load(Ordering::Relaxed);
+                info!("Stats: UDP queries: {}, TCP queries: {}, Errors: {}", udp, tcp, err);
+            }
+        });
+    }
+
+    let tcp_semaphore = Arc::new(Semaphore::new(args.tcp_client_limit));
 
     let udp_loop = {
         let socket = udp_socket.clone();
@@ -146,7 +230,6 @@ async fn main() -> Result<()> {
                         let shared_client = shared_client.clone();
                         let resolver_url = resolver_url.clone();
                         tokio::spawn(async move {
-                            // Acquire read lock to get the current client
                             let client = {
                                 let r = shared_client.read().await;
                                 r.clone()
@@ -165,13 +248,16 @@ async fn main() -> Result<()> {
     let tcp_loop = {
         let shared_client = shared_client.clone();
         let resolver_url = resolver_url_str.clone();
+        let semaphore = tcp_semaphore.clone();
         tokio::spawn(async move {
             loop {
                 match tcp_listener.accept().await {
                     Ok((mut stream, peer)) => {
                         let shared_client = shared_client.clone();
                         let resolver_url = resolver_url.clone();
+                        let permit = semaphore.clone().acquire_owned().await;
                         tokio::spawn(async move {
+                            let _permit = permit; // Hold permit until task finishes
                             let client = {
                                 let r = shared_client.read().await;
                                 r.clone()
@@ -195,19 +281,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn setup_logging(verbosity: u8) {
+fn setup_logging(verbosity: u8, logfile: &Option<String>) {
     let level = match verbosity {
         0 => Level::INFO,
         1 => Level::DEBUG,
         _ => Level::TRACE,
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .finish();
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(level.into());
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    let registry = tracing_subscriber::registry().with(filter);
+
+    if let Some(path) = logfile {
+        if let Ok(file) = File::create(path) {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(file)
+                .with_ansi(false);
+            registry.with(layer).init();
+            return;
+        }
+    }
+
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr);
+    registry.with(layer).init();
 }
 
 fn drop_privileges(user_name: &Option<String>, group_name: &Option<String>) -> Result<()> {
@@ -226,7 +324,7 @@ fn drop_privileges(user_name: &Option<String>, group_name: &Option<String>) -> R
     Ok(())
 }
 
-async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str) -> Result<SocketAddr> {
+async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, force_ipv4: bool) -> Result<SocketAddr> {
     let servers: Vec<SocketAddr> = bootstrap_dns
         .split(',')
         .map(|s| {
@@ -248,7 +346,6 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str) -> Result<SocketAd
             trust_negative_responses: false,
             bind_addr: None,
         });
-        // Also add TCP
         config.add_name_server(NameServerConfig {
             socket_addr: s,
             protocol: Protocol::Tcp,
@@ -258,11 +355,19 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str) -> Result<SocketAd
         });
     }
 
-    let resolver = TokioAsyncResolver::tokio(config, ResolverOpts::default());
+    let mut opts = ResolverOpts::default();
+    if force_ipv4 {
+        opts.ip_strategy = trust_dns_resolver::config::LookupIpStrategy::Ipv4Only;
+    }
+
+    let resolver = TokioAsyncResolver::tokio(config, opts);
     let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider hostname")?;
     
-    // Naively pick the first one. A better implementation might round-robin or test them.
-    let ip = ips.iter().next().ok_or_else(|| anyhow::anyhow!("No IPs returned"))?;
+    let ip = if force_ipv4 {
+        ips.iter().find(|ip| ip.is_ipv4()).ok_or_else(|| anyhow::anyhow!("No IPv4 address found"))?
+    } else {
+        ips.iter().next().ok_or_else(|| anyhow::anyhow!("No IPs returned"))?
+    };
     
     Ok(SocketAddr::new(ip, 443))
 }
@@ -270,12 +375,30 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str) -> Result<SocketAd
 fn create_client(args: &Args, resolve_override: Option<(String, SocketAddr)>) -> Result<Client> {
     let mut builder = Client::builder()
         .use_rustls_tls()
-        .connect_timeout(Duration::from_secs(args.connect_timeout))
-        .pool_idle_timeout(Duration::from_secs(args.idle_timeout));
+        .pool_idle_timeout(Duration::from_secs(args.max_idle_time))
+        .connect_timeout(Duration::from_secs(args.conn_loss_time));
 
-    if let Some(proxy_url) = &args.proxy_url {
+    if args.http11 {
+        builder = builder.http1_only();
+    } else if args.http3 {
+        builder = builder.http3_prior_knowledge();
+    }
+
+    if let Some(proxy_url) = &args.proxy_server {
         let proxy = Proxy::all(proxy_url).context("Failed to parse proxy URL")?;
         builder = builder.proxy(proxy);
+    }
+
+    if let Some(source_addr) = &args.source_addr {
+        let ip = source_addr.parse::<IpAddr>().context("Failed to parse source address")?;
+        builder = builder.local_address(ip);
+    }
+
+    if let Some(ca_path) = &args.ca_path {
+        let mut buf = Vec::new();
+        File::open(ca_path)?.read_to_end(&mut buf)?;
+        let cert = reqwest::Certificate::from_pem(&buf)?;
+        builder = builder.add_root_certificate(cert);
     }
 
     if let Some((domain, addr)) = resolve_override {
@@ -293,10 +416,18 @@ async fn handle_udp_query(
     data: Vec<u8>,
     peer: SocketAddr,
 ) -> Result<()> {
+    STATS.queries_udp.fetch_add(1, Ordering::Relaxed);
     debug!("UDP query from {}", peer);
-    let bytes = forward_to_doh(client, resolver_url, data).await?;
-    socket.send_to(&bytes, peer).await?;
-    Ok(())
+    match forward_to_doh(client, resolver_url, data).await {
+        Ok(bytes) => {
+            socket.send_to(&bytes, peer).await?;
+            Ok(())
+        }
+        Err(e) => {
+            STATS.errors.fetch_add(1, Ordering::Relaxed);
+            Err(e)
+        }
+    }
 }
 
 async fn handle_tcp_query(
@@ -304,6 +435,7 @@ async fn handle_tcp_query(
     client: Client,
     resolver_url: Arc<String>,
 ) -> Result<()> {
+    STATS.queries_tcp.fetch_add(1, Ordering::Relaxed);
     let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf).await?;
     let len = u16::from_be_bytes(len_buf) as usize;
@@ -312,13 +444,18 @@ async fn handle_tcp_query(
     stream.read_exact(&mut data).await?;
 
     debug!("TCP query of length {}", len);
-    let bytes = forward_to_doh(client, resolver_url, data).await?;
-    
-    let resp_len = (bytes.len() as u16).to_be_bytes();
-    stream.write_all(&resp_len).await?;
-    stream.write_all(&bytes).await?;
-    
-    Ok(())
+    match forward_to_doh(client, resolver_url, data).await {
+        Ok(bytes) => {
+            let resp_len = (bytes.len() as u16).to_be_bytes();
+            stream.write_all(&resp_len).await?;
+            stream.write_all(&bytes).await?;
+            Ok(())
+        }
+        Err(e) => {
+            STATS.errors.fetch_add(1, Ordering::Relaxed);
+            Err(e)
+        }
+    }
 }
 
 async fn forward_to_doh(

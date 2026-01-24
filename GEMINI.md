@@ -54,13 +54,30 @@ cargo run -- -b 8.8.8.8 -r https://dns.google/dns-query
 **Common Flags:**
 *   `-a`, `--listen-addr <IP>`: Listen address (default: `127.0.0.1`).
 *   `-p`, `--listen-port <PORT>`: Listen port (default: `5053`).
-*   `-b`, `--bootstrap-dns <IPs>`: Comma-separated list of bootstrap DNS servers (IPs) to resolve the DoH provider's hostname.
-*   `-r`, `--resolver-url <URL>`: Resolver URL (DoH endpoint) (default: `https://dns.google/dns-query`).
-*   `-v`: Increase verbosity (e.g., `-v`, `-vv` for debug/trace logs).
+*   `-T`, `--tcp-client-limit <N>`: Max concurrent TCP clients (default: `20`).
+*   `-b`, `--bootstrap-dns <IPs>`: Comma-separated list of bootstrap DNS servers.
+*   `-i`, `--polling-interval <SECS>`: Interval to refresh DoH provider IP (default: `120`).
+*   `-4`, `--force-ipv4`: Force IPv4 for DoH provider resolution.
+*   `-r`, `--resolver-url <URL>`: DoH endpoint (default: `https://dns.google/dns-query`).
+*   `-t`, `--proxy-server <URL>`: HTTP/SOCKS5 proxy.
+*   `-S`, `--source-addr <IP>`: Source IP for outbound connections.
+*   `-x`, `--http11`: Force HTTP/1.1.
+*   `-q`, `--http3`: Force HTTP/3 (QUIC).
+*   `-m`, `--max-idle-time <SECS>`: Max idle time for HTTPS connections (default: `118`).
+*   `-L`, `--conn-loss-time <SECS>`: Connection timeout (default: `15`).
+*   `-C`, `--ca-path <FILE>`: Path to CA certificates.
+*   `-d`, `--daemonize`: Run in background.
+*   `-u`, `--user <USER>`: Drop privileges to user.
+*   `-g`, `--group <GROUP>`: Drop privileges to group.
+*   `-v`: Increase verbosity.
+*   `-l`, `--logfile <FILE>`: Log to file.
+*   `-s`, `--statistic-interval <SECS>`: Interval to print stats.
+*   `-V`, `--print-version`: Print version and exit.
 *   `-h`, `--help`: Print help.
 
 ## Features vs C Version
 
 *   **Memory Safety:** Built with Rust to prevent common memory vulnerabilities.
 *   **Async/Await:** Uses Tokio for efficient handling of concurrent UDP and TCP connections.
-*   **Bootstrap DNS:** Built-in support for bootstrapping the DoH provider IP using standard DNS (via `trust-dns-resolver`), ensuring reliability even if the system DNS is unavailable.
+*   **Bootstrap DNS:** Built-in support for bootstrapping the DoH provider IP using standard DNS, ensuring reliability even if the system DNS is unavailable.
+*   **Full Flag Parity:** Supports almost all flags from the original C version, including proxy support, source IP binding, and privilege dropping.
