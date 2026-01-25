@@ -20,10 +20,21 @@ cargo build --release
 
 ### Cross-Compilation (Advanced)
 
-Use the unified management script to setup environments and build for multiple architectures (statically linked with musl). **Note: This script is intended to be run on an x86_64 Linux host.**
+Use the unified management script to setup environments and build for multiple architectures (statically linked with musl).
 
+#### Prerequisites for `manage.sh`
+Before running the script on a fresh Linux environment, ensure you have the following installed:
+- **OS:** x86_64 Linux host
+- **Tools:** `curl`, `tar`, `git`, and `build-essential` (or equivalent development tools)
+
+Example for Ubuntu/Debian:
 ```bash
-# Setup environment (downloads toolchains, configures rustup)
+sudo apt update && sudo apt install build-essential curl git
+```
+
+#### Usage
+```bash
+# Setup environment (downloads toolchains, configures rustup locally)
 ./manage.sh setup all       # Setup for all architectures
 ./manage.sh setup mips      # Setup only for MIPS
 

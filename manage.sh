@@ -52,7 +52,9 @@ setup_arch() {
             fi
             
             # Add Target
-            rustup target add "$target"
+            if [ "$id" != "mips" ]; then
+                rustup target add "$target"
+            fi
             
             # Configure Cargo
             mkdir -p .cargo
