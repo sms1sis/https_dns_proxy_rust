@@ -4,3 +4,19 @@ rustflags = ["-C", "strip=symbols"]
 
 [build]
 target = "mips-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+linker = "/home/anon/https_dns_proxy_rust/toolchains/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc"
+rustflags = ["-C", "strip=symbols"]
+
+[target.i686-unknown-linux-musl]
+linker = "/home/anon/https_dns_proxy_rust/toolchains/i686-linux-musl-cross/bin/i686-linux-musl-gcc"
+rustflags = ["-C", "strip=symbols"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "/home/anon/https_dns_proxy_rust/toolchains/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc"
+rustflags = ["-C", "strip=symbols"]
+
+[target.armv7-unknown-linux-musleabihf]
+linker = "/home/anon/https_dns_proxy_rust/toolchains/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-gcc"
+rustflags = ["-C", "strip=symbols"]

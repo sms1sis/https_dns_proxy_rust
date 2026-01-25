@@ -2,6 +2,8 @@
 
 A lightweight, asynchronous DNS-to-HTTPS (DoH) proxy written in Rust.
 
+This project is a Rust implementation of the [original C-based https-dns-proxy](https://github.com/stangri/https-dns-proxy) by [stangri](https://github.com/stangri).
+
 ## Features
 
 - **UDP & TCP Support**: Listen for DNS queries on both protocols.
@@ -15,6 +17,22 @@ A lightweight, asynchronous DNS-to-HTTPS (DoH) proxy written in Rust.
 ```bash
 cargo build --release
 ```
+
+### Cross-Compilation (Advanced)
+
+Use the unified management script to setup environments and build for multiple architectures (statically linked with musl). **Note: This script is intended to be run on an x86_64 Linux host.**
+
+```bash
+# Setup environment (downloads toolchains, configures rustup)
+./manage.sh setup all       # Setup for all architectures
+./manage.sh setup mips      # Setup only for MIPS
+
+# Build binaries
+./manage.sh build all       # Build all architectures
+./manage.sh build x86_64    # Build only for x86_64
+```
+
+Supported architectures: `x86_64`, `x86`, `arm64`, `armv7`, `mips`.
 
 ### Run
 

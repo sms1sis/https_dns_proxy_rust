@@ -90,10 +90,6 @@ struct Args {
     #[arg(short = 'C', long)]
     ca_path: Option<String>,
 
-    /// Optional DSCP codepoint to set on upstream HTTPS server connections
-    #[arg(short = 'c', long)]
-    dscp_codepoint: Option<u8>,
-
     /// Daemonize
     #[arg(short = 'd', long)]
     daemonize: bool,
@@ -117,10 +113,6 @@ struct Args {
     /// Optional statistic printout interval
     #[arg(short = 's', long, default_value_t = 0)]
     statistic_interval: u64,
-
-    /// Flight recorder: storing desired amount of logs in memory
-    #[arg(short = 'F', long, default_value_t = 0)]
-    log_limit: usize,
 
     /// Print versions and exit
     #[arg(short = 'V', long)]
