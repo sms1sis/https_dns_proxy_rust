@@ -3,6 +3,13 @@ name = "https_dns_proxy_rust"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+jni = ["dep:jni", "dep:tokio-util"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["rustls-tls-manual-roots", "socks", "http2", "http3"], default-features = false }
@@ -17,6 +24,9 @@ trust-dns-resolver = "0.23.2"
 nix = { version = "0.29", features = ["user", "fs"] }
 daemonize = "0.5"
 lazy_static = "1.4"
+android_logger = "0.14"
+jni = { version = "0.21", optional = true }
+tokio-util = { version = "0.7", optional = true }
 
 [profile.release]
 opt-level = "z"       # Optimize for size

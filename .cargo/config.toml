@@ -3,7 +3,10 @@ linker = "/home/anon/https_dns_proxy_rust/toolchains/mips-linux-musl-cross/bin/m
 rustflags = ["-C", "strip=symbols"]
 
 [build]
-target = "mips-unknown-linux-musl"
+rustflags = ["--cfg", "reqwest_unstable"]
+
+# [build]
+# target = "mips-unknown-linux-musl"
 
 [target.x86_64-unknown-linux-musl]
 linker = "/home/anon/https_dns_proxy_rust/toolchains/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc"
