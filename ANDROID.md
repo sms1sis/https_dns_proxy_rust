@@ -29,6 +29,11 @@ The resulting library will be at `target/aarch64-linux-android/release/libhttps_
 2.  **Define the Service**:
 
 ```kotlin
+package io.github.https_dns_proxy_rust
+
+import android.app.Service
+import kotlin.concurrent.thread
+
 class ProxyService : Service() {
     companion object {
         init {
@@ -39,6 +44,8 @@ class ProxyService : Service() {
     external fun initLogger()
     external fun startProxy(listenAddr: String, listenPort: Int, resolverUrl: String, bootstrapDns: String): Int
     external fun stopProxy()
+...
+```
 
     override fun onCreate() {
         super.onCreate()
@@ -58,7 +65,7 @@ class ProxyService : Service() {
 
 ## Note on Package Name
 
-The JNI functions are currently named for the package `com.example.httpsdnsproxy`. If your app uses a different package name, you **must** update the function names in `src/lib.rs`.
+The JNI functions are currently named for the package `io.github.https_dns_proxy_rust`. If your app uses a different package name, you **must** update the function names in `src/lib.rs`.
 
 Example for `com.mycompany.dns`:
 `Java_com_mycompany_dns_ProxyService_startProxy`

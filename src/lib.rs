@@ -200,7 +200,7 @@ pub mod jni_api {
     }
 
     #[no_mangle]
-    pub extern "system" fn Java_com_example_httpsdnsproxy_ProxyService_initLogger(
+    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_initLogger(
         _env: JNIEnv,
         _class: JClass,
     ) {
@@ -213,7 +213,7 @@ pub mod jni_api {
     }
 
     #[no_mangle]
-    pub extern "system" fn Java_com_example_httpsdnsproxy_ProxyService_startProxy(
+    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_startProxy(
         mut env: JNIEnv,
         _class: JClass,
         listen_addr: JString,
@@ -268,7 +268,7 @@ pub mod jni_api {
     }
 
     #[no_mangle]
-    pub extern "system" fn Java_com_example_httpsdnsproxy_ProxyService_stopProxy(
+    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_stopProxy(
         _env: JNIEnv,
         _class: JClass,
     ) {
