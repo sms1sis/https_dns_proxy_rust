@@ -11,23 +11,23 @@ use tracing_subscriber::{prelude::*};
 use trust_dns_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, Protocol};
 use trust_dns_resolver::TokioAsyncResolver;
 use std::time::Duration;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use nix::unistd::{User, Group, setuid, setgid};
 use daemonize::Daemonize;
 use std::fs::File;
 use std::io::Read;
 
 struct Stats {
-    queries_udp: AtomicU64,
-    queries_tcp: AtomicU64,
-    errors: AtomicU64,
+    queries_udp: AtomicUsize,
+    queries_tcp: AtomicUsize,
+    errors: AtomicUsize,
 }
 
 lazy_static::lazy_static! {
     static ref STATS: Stats = Stats {
-        queries_udp: AtomicU64::new(0),
-        queries_tcp: AtomicU64::new(0),
-        errors: AtomicU64::new(0),
+        queries_udp: AtomicUsize::new(0),
+        queries_tcp: AtomicUsize::new(0),
+        errors: AtomicUsize::new(0),
     };
 }
 
