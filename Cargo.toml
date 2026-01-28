@@ -14,7 +14,7 @@ jni = ["dep:jni", "dep:tokio-util"]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["rustls-tls-manual-roots", "socks", "http2", "http3"], default-features = false }
 clap = { version = "4", features = ["derive"] }
-tracing = "0.1"
+tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 anyhow = "1"
@@ -27,6 +27,7 @@ lazy_static = "1.4"
 android_logger = "0.14"
 jni = { version = "0.21", optional = true }
 tokio-util = { version = "0.7", optional = true }
+log = "0.4"
 
 [profile.release]
 opt-level = "z"       # Optimize for size

@@ -3,7 +3,10 @@ use anyhow::{Result, Context};
 use std::sync::Arc;
 use tracing::Level;
 use tracing_subscriber::prelude::*;
+// Only import these on non-Android platforms
+#[cfg(not(target_os = "android"))]
 use nix::unistd::{User, Group, setuid, setgid};
+#[cfg(not(target_os = "android"))]
 use daemonize::Daemonize;
 use std::fs::File;
 use https_dns_proxy_rust::{Config, Stats, run_proxy};
@@ -107,6 +110,7 @@ async fn main() -> Result<()> {
 
     setup_logging(args.verbose, &args.logfile);
 
+    #[cfg(not(target_os = "android"))]
     if args.daemonize {
         let daemonize = Daemonize::new()
             .working_directory("/tmp")

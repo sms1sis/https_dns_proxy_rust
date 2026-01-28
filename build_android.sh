@@ -1,38 +1,32 @@
 #!/bin/bash
-
-# Exit on error
 set -e
+
+# 1. Point to your specific NDK version
+export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865
+
+# 2. Add the NDK toolchain to your PATH so Cargo can find the 'clang' tools
+TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+export PATH=$TOOLCHAIN:$PATH
 
 # Define targets
 TARGETS=("aarch64-linux-android" "armv7-linux-androideabi" "i686-linux-android" "x86_64-linux-android")
-
-# Check for RUSTFLAGS
 export RUSTFLAGS="--cfg reqwest_unstable"
 
-echo "Building for Android targets..."
+echo "Using NDK from: $ANDROID_NDK_HOME"
 
 for TARGET in "${TARGETS[@]}"; do
     echo "--------------------------------------------------"
     echo "Building for $TARGET..."
-    
-    # Check if target is installed
-    if ! rustup target list | grep -q "$TARGET (installed)"; then
-        echo "Target $TARGET not found. Installing..."
-        rustup target add "$TARGET"
-    fi
 
-    cargo build --release --target "$TARGET" --features jni
+    # Use --platform instead of -p to avoid confusion with --package
+    cargo ndk --target "$TARGET" --platform 21 build --release --lib --features jni
 done
 
 echo "--------------------------------------------------"
-echo "Build complete! Libraries are in target/<target>/release/libhttps_dns_proxy_rust.so"
+echo "Build complete! Collecting libraries..."
 
-# Create a directory to collect all libraries
 OUTPUT_DIR="android_libs"
-mkdir -p "$OUTPUT_DIR/arm64-v8a"
-mkdir -p "$OUTPUT_DIR/armeabi-v7a"
-mkdir -p "$OUTPUT_DIR/x86"
-mkdir -p "$OUTPUT_DIR/x86_64"
+mkdir -p "$OUTPUT_DIR/arm64-v8a" "$OUTPUT_DIR/armeabi-v7a" "$OUTPUT_DIR/x86" "$OUTPUT_DIR/x86_64"
 
 cp target/aarch64-linux-android/release/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/arm64-v8a/"
 cp target/armv7-linux-androideabi/release/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/armeabi-v7a/"
