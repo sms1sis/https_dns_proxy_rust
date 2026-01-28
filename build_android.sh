@@ -25,7 +25,8 @@ done
 echo "--------------------------------------------------"
 echo "Build complete! Collecting libraries..."
 
-OUTPUT_DIR="android_libs"
+# Copy to the Android project's jniLibs directory
+OUTPUT_DIR="android/app/src/main/jniLibs"
 mkdir -p "$OUTPUT_DIR/arm64-v8a" "$OUTPUT_DIR/armeabi-v7a" "$OUTPUT_DIR/x86" "$OUTPUT_DIR/x86_64"
 
 cp target/aarch64-linux-android/release/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/arm64-v8a/"
