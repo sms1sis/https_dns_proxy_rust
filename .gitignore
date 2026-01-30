@@ -1,3 +1,19 @@
 /target
 /local-rust
 /toolchains
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# Memory dumps (from crashes)
+android/*.hprof
+
+# IDEs
+android/.idea/
+.DS_Store
+
+# Note: Usually, you WANT to keep 'gradlew' and 'gradle/wrapper' 
+# so others can build the project without installing Gradle manually.
