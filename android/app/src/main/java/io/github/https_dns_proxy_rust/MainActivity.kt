@@ -3,6 +3,7 @@ package io.github.https_dns_proxy_rust
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -91,6 +92,15 @@ class MainActivity : ComponentActivity() {
         var listenPort by remember { mutableStateOf("5053") }
         var bootstrapDns by remember { mutableStateOf("8.8.8.8,1.1.1.1") }
 
+        val vpnPermissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == RESULT_OK) {
+                startProxyService(resolverUrl, listenPort, bootstrapDns)
+                isRunning = true
+            }
+        }
+
         val permissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { _ -> }
@@ -133,12 +143,10 @@ class MainActivity : ComponentActivity() {
             ) {
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // Modern animated status visualization
                 StatusHero(isRunning)
 
                 Spacer(modifier = Modifier.height(40.dp))
 
-                // Configuration Section
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.extraLarge,
@@ -192,23 +200,22 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(modifier = Modifier.height(48.dp))
 
-                // Control Button with Animation
                 FloatingActionButton(
                     onClick = {
                         if (isRunning) {
                             stopService(Intent(this@MainActivity, ProxyService::class.java))
+                            isRunning = false
                         } else {
-                            val intent = Intent(this@MainActivity, ProxyService::class.java).apply {
-                                putExtra("resolverUrl", resolverUrl)
-                                putExtra("listenPort", listenPort.toIntOrNull() ?: 5053)
-                                putExtra("bootstrapDns", bootstrapDns)
+                            val vpnIntent = VpnService.prepare(this@MainActivity)
+                            if (vpnIntent != null) {
+                                vpnPermissionLauncher.launch(vpnIntent)
+                            } else {
+                                startProxyService(resolverUrl, listenPort, bootstrapDns)
+                                isRunning = true
                             }
-                            startForegroundService(intent)
                         }
-                        isRunning = !isRunning
                     },
-                    modifier = Modifier
-                        .size(80.dp),
+                    modifier = Modifier.size(80.dp),
                     shape = CircleShape,
                     containerColor = if (isRunning) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
                     contentColor = if (isRunning) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
@@ -219,9 +226,9 @@ class MainActivity : ComponentActivity() {
                         transitionSpec = {
                             scaleIn() + fadeIn() togetherWith scaleOut() + fadeOut()
                         }
-                    ) {
+                    ) { running ->
                         Icon(
-                            imageVector = if (isRunning) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                            imageVector = if (running) Icons.Filled.Stop else Icons.Filled.PlayArrow,
                             contentDescription = null,
                             modifier = Modifier.size(36.dp)
                         )
@@ -239,6 +246,19 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(modifier = Modifier.height(32.dp))
             }
+        }
+    }
+
+    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String) {
+        val intent = Intent(this, ProxyService::class.java).apply {
+            putExtra("resolverUrl", resolverUrl)
+            putExtra("listenPort", listenPort.toIntOrNull() ?: 5053)
+            putExtra("bootstrapDns", bootstrapDns)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
     }
 
