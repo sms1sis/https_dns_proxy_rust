@@ -12,11 +12,28 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fs::File;
 use std::io::Read;
+use std::collections::VecDeque;
+use std::sync::Mutex;
 
 pub struct Stats {
     pub queries_udp: AtomicUsize,
     pub queries_tcp: AtomicUsize,
     pub errors: AtomicUsize,
+    pub last_latency_ms: AtomicUsize,
+}
+
+lazy_static::lazy_static! {
+    static ref QUERY_LOGS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::with_capacity(50));
+    static ref GLOBAL_STATS: Arc<RwLock<Option<Arc<Stats>>>> = Arc::new(RwLock::new(None));
+}
+
+fn add_query_log(domain: &str, status: &str) {
+    let mut logs = QUERY_LOGS.lock().unwrap();
+    if logs.len() >= 50 {
+        logs.pop_front();
+    }
+    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+    logs.push_back(format!("[{}] {} -> {}", timestamp, domain, status));
 }
 
 impl Stats {
@@ -25,6 +42,7 @@ impl Stats {
             queries_udp: AtomicUsize::new(0),
             queries_tcp: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
+            last_latency_ms: AtomicUsize::new(0),
         }
     }
 }
@@ -95,24 +113,6 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         })
     };
 
-    // Stats Loop
-    let stats_handle = if config.statistic_interval > 0 {
-        let stats = stats.clone();
-        Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(config.statistic_interval));
-            loop {
-                interval.tick().await;
-                info!("Stats: UDP: {}, TCP: {}, Errors: {}", 
-                    stats.queries_udp.load(Ordering::Relaxed),
-                    stats.queries_tcp.load(Ordering::Relaxed),
-                    stats.errors.load(Ordering::Relaxed)
-                );
-            }
-        }))
-    } else {
-        None
-    };
-
     let tcp_semaphore = Arc::new(Semaphore::new(config.tcp_client_limit));
 
     let udp_loop = {
@@ -134,7 +134,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
                             let client = shared_client.read().await.clone();
                             if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats).await {
-                                debug!("UDP error from {}: {}", peer, e);
+                                debug!("UDP error from {}: {:#}", peer, e);
                             }
                         });
                     }
@@ -179,8 +179,6 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     }
 
     bootstrap_handle.abort();
-    if let Some(h) = stats_handle { h.abort(); }
-
     Ok(())
 }
 
@@ -255,6 +253,10 @@ pub mod jni_api {
 
         RUNTIME.spawn(async move {
             let stats = Arc::new(Stats::new());
+            {
+                let mut w = GLOBAL_STATS.write().await;
+                *w = Some(stats.clone());
+            }
             let (tx, rx) = tokio::sync::oneshot::channel();
             
             tokio::spawn(async move {
@@ -271,6 +273,38 @@ pub mod jni_api {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_getLatency(
+        _env: JNIEnv,
+        _class: JClass,
+    ) -> jint {
+        let stats = RUNTIME.block_on(async {
+            let r = GLOBAL_STATS.read().await;
+            r.as_ref().map(|s| s.last_latency_ms.load(Ordering::Relaxed))
+        });
+        stats.unwrap_or(0) as jint
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_getLogs(
+        mut env: JNIEnv,
+        _class: JClass,
+    ) -> jni::sys::jobjectArray {
+        let logs = QUERY_LOGS.lock().unwrap();
+        let list: Vec<String> = logs.iter().cloned().collect();
+        
+        let cls = env.find_class("java/lang/String").unwrap();
+        let initial = env.new_string("").unwrap();
+        let array = env.new_object_array(list.len() as jni::sys::jsize, cls, &initial).unwrap();
+        
+        for (i, log) in list.iter().enumerate() {
+            let s = env.new_string(log).unwrap();
+            env.set_object_array_element(&array, i as jni::sys::jsize, &s).unwrap();
+        }
+        
+        array.into_raw()
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_stopProxy(
         _env: JNIEnv,
         _class: JClass,
@@ -279,6 +313,10 @@ pub mod jni_api {
         if let Some(token) = lock.take() {
             token.cancel();
         }
+        RUNTIME.block_on(async {
+            let mut w = GLOBAL_STATS.write().await;
+            *w = None;
+        });
     }
 }
 
@@ -357,14 +395,13 @@ async fn handle_udp_query(
     peer: SocketAddr,
     stats: Arc<Stats>,
 ) -> Result<()> {
-    match forward_to_doh(client, resolver_url, data).await {
+    match forward_to_doh(client, resolver_url, data, stats.clone()).await {
         Ok(bytes) => {
             socket.send_to(&bytes, peer).await?;
             Ok(())
         }
         Err(e) => {
             stats.errors.fetch_add(1, Ordering::Relaxed);
-            // Log the full error chain for debugging
             debug!("UDP error from {}: {:#}", peer, e);
             Err(e)
         }
@@ -384,7 +421,7 @@ async fn handle_tcp_query(
     let mut data = vec![0u8; len];
     stream.read_exact(&mut data).await?;
 
-    match forward_to_doh(client, resolver_url, data).await {
+    match forward_to_doh(client, resolver_url, data, stats.clone()).await {
         Ok(bytes) => {
             let resp_len = (bytes.len() as u16).to_be_bytes();
             stream.write_all(&resp_len).await?;
@@ -398,18 +435,45 @@ async fn handle_tcp_query(
     }
 }
 
-async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Vec<u8>) -> Result<Vec<u8>> {
+async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Vec<u8>, stats: Arc<Stats>) -> Result<Vec<u8>> {
+    let start = std::time::Instant::now();
+    let domain = if data.len() > 12 {
+        let mut d = String::new();
+        let mut i = 12;
+        while i < data.len() && data[i] != 0 {
+            let len = data[i] as usize;
+            i += 1;
+            if i + len > data.len() { break; }
+            if !d.is_empty() { d.push('.'); }
+            d.push_str(&String::from_utf8_lossy(&data[i..i+len]));
+            i += len;
+        }
+        if d.is_empty() { "unknown".to_string() } else { d }
+    } else { "unknown".to_string() };
+
     let resp = client
         .post(&*resolver_url)
         .header("content-type", "application/dns-message")
         .header("accept", "application/dns-message")
         .body(data)
         .send()
-        .await?;
+        .await;
 
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Resolver status {}", resp.status()));
+    match resp {
+        Ok(r) => {
+            if !r.status().is_success() {
+                add_query_log(&domain, "Error (HTTP)");
+                return Err(anyhow::anyhow!("Resolver status {}", r.status()));
+            }
+            let bytes = r.bytes().await?.to_vec();
+            let latency = start.elapsed().as_millis() as usize;
+            stats.last_latency_ms.store(latency, Ordering::Relaxed);
+            add_query_log(&domain, &format!("OK ({}ms)", latency));
+            Ok(bytes)
+        }
+        Err(e) => {
+            add_query_log(&domain, "Error (Net)");
+            Err(e.into())
+        }
     }
-
-    Ok(resp.bytes().await?.to_vec())
 }

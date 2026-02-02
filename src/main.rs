@@ -27,7 +27,7 @@ struct Args {
     tcp_client_limit: usize,
 
     /// Comma-separated IPv4/v6 addresses and ports (addr:port) of DNS servers to resolve resolver host
-    #[arg(short = 'b', long, default_value = "8.8.8.8,1.1.1.1,8.8.4.4,1.0.0.1,145.100.185.15,145.100.185.16,185.49.141.37")]
+    #[arg(short = 'b', long, default_value = "1.1.1.1")]
     bootstrap_dns: String,
 
     /// Optional polling interval of DNS servers
@@ -39,7 +39,7 @@ struct Args {
     force_ipv4: bool,
 
     /// The HTTPS path to the resolver URL
-    #[arg(short = 'r', long, default_value = "https://dns.google/dns-query")]
+    #[arg(short = 'r', long, default_value = "https://cloudflare-dns.com/dns-query")]
     resolver_url: String,
 
     /// Optional HTTP proxy (e.g., socks5://127.0.0.1:1080)

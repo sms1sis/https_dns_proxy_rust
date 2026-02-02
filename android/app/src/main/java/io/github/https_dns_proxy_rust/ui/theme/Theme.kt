@@ -27,13 +27,23 @@ private val LightColorScheme = lightColorScheme(
     tertiary = androidx.compose.ui.graphics.Color(0xFF7D5260)
 )
 
+private val AmoledColorScheme = darkColorScheme(
+    primary = androidx.compose.ui.graphics.Color(0xFFD0BCFF),
+    secondary = androidx.compose.ui.graphics.Color(0xFFCCC2DC),
+    tertiary = androidx.compose.ui.graphics.Color(0xFFEFB8C8),
+    background = androidx.compose.ui.graphics.Color(0xFF000000),
+    surface = androidx.compose.ui.graphics.Color(0xFF000000)
+)
+
 @Composable
 fun HttpsDnsProxyTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    amoled: Boolean = false,
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
+        amoled -> AmoledColorScheme
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)

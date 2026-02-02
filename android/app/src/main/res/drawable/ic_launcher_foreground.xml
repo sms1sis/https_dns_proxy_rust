@@ -3,13 +3,19 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Outer geometric ring representing the network -->
     <path
-        android:fillColor="@color/colorPrimary"
-        android:pathData="M54,2C25.28,2 2,25.28 2,54s23.28,52 52,52s52,-23.28 52,-52S82.72,2 54,2zM54,98c-24.3,0 -44,-19.7 -44,-44S29.7,10 54,10s44,19.7 44,44S78.3,98 54,98z" />
+        android:fillColor="#FFFFFF"
+        android:alpha="0.2"
+        android:pathData="M54,20C35.2,20 20,35.2 20,54s15.2,34 34,34s34,-15.2 34,-34S72.8,20 54,20zM54,80c-14.4,0 -26,-11.6 -26,-26s11.6,-26 26,-26s26,11.6 26,26S68.4,80 54,80z" />
+    
+    <!-- Shield Shape -->
     <path
-        android:fillColor="@color/colorPrimary"
-        android:pathData="M54,26c-15.46,0 -28,12.54 -28,28s12.54,28 28,28s28,-12.54 28,-28S69.46,26 54,26zM54,74c-11.05,0 -20,-8.95 -20,-20s8.95,-20 20,-20s20,8.95 20,20S65.05,74 54,74z" />
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28L34,36v22c0,12.4 8.5,24 20,27c11.5,-3 20,-14.6 20,-27V36L54,28z" />
+    
+    <!-- Central Accent (Safe/Secure indicator) -->
     <path
-        android:fillColor="@color/colorPrimary"
-        android:pathData="M54,42c-6.63,0 -12,5.37 -12,12s5.37,12 12,12s12,-5.37 12,-12S60.63,42 54,42z" />
+        android:fillColor="#6750A4"
+        android:pathData="M54,40l-10,12h7v14l10,-12h-7z" />
 </vector>
