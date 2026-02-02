@@ -75,9 +75,16 @@ cargo run -- -b 8.8.8.8 -r https://dns.google/dns-query
 *   `-V`, `--print-version`: Print version and exit.
 *   `-h`, `--help`: Print help.
 
-## Features vs C Version
+## Android Specific Notes
 
-*   **Memory Safety:** Built with Rust to prevent common memory vulnerabilities.
-*   **Async/Await:** Uses Tokio for efficient handling of concurrent UDP and TCP connections.
-*   **Bootstrap DNS:** Built-in support for bootstrapping the DoH provider IP using standard DNS, ensuring reliability even if the system DNS is unavailable.
-*   **Full Flag Parity:** Supports almost all flags from the original C version, including proxy support, source IP binding, and privilege dropping.
+
+
+*   **Architecture:** Optimized for `arm64-v8a` (ARMv8-A).
+
+*   **Privileged Ports:** Android prevents binding to ports < 1024 (like 53) for non-root apps. Always use a high port (e.g., 5053) for the Rust proxy.
+
+*   **VPN DNS Routing:** Using `127.0.0.1` as a DNS server in `VpnService.Builder` causes `IllegalArgumentException: Bad address` on many Android versions. Use the VPN interface IP (e.g., `10.0.0.2`) instead.
+
+*   **Connectivity:** To prevent the "no internet" issue, only route the DNS server's IP (e.g., `.addRoute("10.0.0.2", 32)`) into the VPN. Routing `0.0.0.0/0` will drop all non-DNS traffic unless the app is specifically designed as a full-tunnel VPN.
+
+*   **Service Lifecycle:** Use explicit "STOP" actions and ensure `vpnInterface.close()` is called to properly shut down the VPN and clear the status bar icon.

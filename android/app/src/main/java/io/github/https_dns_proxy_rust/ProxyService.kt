@@ -9,11 +9,18 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.nio.ByteBuffer
 import kotlin.concurrent.thread
 
 class ProxyService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var isRunning = false
 
     companion object {
         const val CHANNEL_ID = "ProxyServiceChannel"
@@ -36,81 +43,128 @@ class ProxyService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val listenAddr = "0.0.0.0"
+        if (intent?.action == "STOP") {
+            handleStop()
+            return START_NOT_STICKY
+        }
+
+        if (isRunning) return START_STICKY
+        isRunning = true
+
         val listenPort = intent?.getIntExtra("listenPort", 5053) ?: 5053
         val resolverUrl = intent?.getStringExtra("resolverUrl") ?: "https://dns.google/dns-query"
         val bootstrapDns = intent?.getStringExtra("bootstrapDns") ?: "8.8.8.8,1.1.1.1"
 
-        // 1. Start Foreground Notification IMMEDIATELY
-        val mainActivityIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, mainActivityIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+        startForegroundServiceNotification()
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SafeDNS Active")
-            .setContentText("DNS queries are being encrypted via $resolverUrl")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        // 1. Start Rust Proxy on localhost
+        thread {
+            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
+            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns)
         }
 
-        // 2. Establish VPN Interface to capture DNS traffic
+        // 2. Establish VPN and Forward Traffic
         try {
             vpnInterface = Builder()
                 .setSession("SafeDNS")
-                .addAddress("10.0.0.2", 24)
-                .addDnsServer("10.0.0.2") // Point DNS to the VPN interface where our proxy will listen
-                .addRoute("0.0.0.0", 0)    // Route all traffic through VPN to ensure DNS is captured
+                .addAddress("10.0.0.1", 32)
+                .addDnsServer("10.0.0.1")
+                .addRoute("10.0.0.1", 32)
+                .setBlocking(true)
                 .establish()
             
             Log.d(TAG, "VPN Interface established")
+            
+            thread {
+                forwardPackets(listenPort)
+            }
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish VPN", e)
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        // 3. Start the Rust proxy in a separate thread
-        thread {
-            Log.d(TAG, "Starting Rust proxy on $listenAddr:$listenPort")
-            startProxy(listenAddr, listenPort, resolverUrl, bootstrapDns)
+            handleStop()
         }
 
         return START_STICKY
     }
 
-    override fun onDestroy() {
-        stopProxy()
+    private fun forwardPackets(proxyPort: Int) {
+        val fd = vpnInterface?.fileDescriptor ?: return
+        val inputStream = FileInputStream(fd)
+        val outputStream = FileOutputStream(fd)
+        val packet = ByteBuffer.allocate(16384)
+        val udpSocket = DatagramSocket()
+        val proxyAddr = InetAddress.getByName("127.0.0.1")
+
         try {
-            vpnInterface?.close()
-            vpnInterface = null
+            while (isRunning) {
+                val length = inputStream.read(packet.array())
+                if (length > 0) {
+                    // Simple IPv4/UDP header parsing (minimal)
+                    val data = packet.array()
+                    if (data[0].toInt() == 0x45 && data[9].toInt() == 17) { // IPv4 + UDP
+                        val ihl = (data[0].toInt() and 0x0F) * 4
+                        val udpHeaderStart = ihl
+                        val dPort = ((data[udpHeaderStart + 2].toInt() and 0xFF) shl 8) or (data[udpHeaderStart + 3].toInt() and 0xFF)
+                        
+                        if (dPort == 53) { // It's a DNS query
+                            val payloadStart = udpHeaderStart + 8
+                            val payloadLen = length - payloadStart
+                            
+                            val dnsPayload = data.copyOfRange(payloadStart, length)
+                            
+                            // Forward to Rust Proxy
+                            val sendPacket = DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort)
+                            udpSocket.send(sendPacket)
+                            
+                            // Receive Response
+                            val recvBuf = ByteArray(4096)
+                            val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
+                            udpSocket.soTimeout = 2000
+                            try {
+                                udpSocket.receive(recvPacket)
+                                
+                                // Construct IP/UDP response back to phone
+                                // Note: This is a simplification. A robust implementation would swap IPs/Ports.
+                                // For now, we just log and wait for the user to confirm if queries reach Rust.
+                                Log.d(TAG, "DNS Response received from Rust proxy")
+                            } catch (e: Exception) {}
+                        }
+                    }
+                    packet.clear()
+                }
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error closing VPN interface", e)
+            Log.e(TAG, "Forwarder error", e)
         }
+    }
+
+    private fun startForegroundServiceNotification() {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("SafeDNS Active")
+            .setContentText("DNS protection is active")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setOngoing(true)
+            .build()
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
+    private fun handleStop() {
+        isRunning = false
+        stopProxy()
+        vpnInterface?.close()
+        vpnInterface = null
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        handleStop()
         super.onDestroy()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                CHANNEL_ID,
-                "SafeDNS Service Channel",
-                NotificationManager.IMPORTANCE_LOW
-            )
             val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(serviceChannel)
+            manager?.createNotificationChannel(NotificationChannel(CHANNEL_ID, "SafeDNS", NotificationManager.IMPORTANCE_LOW))
         }
     }
 }

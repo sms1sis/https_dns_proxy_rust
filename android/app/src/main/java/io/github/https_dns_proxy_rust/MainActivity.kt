@@ -203,7 +203,10 @@ class MainActivity : ComponentActivity() {
                 FloatingActionButton(
                     onClick = {
                         if (isRunning) {
-                            stopService(Intent(this@MainActivity, ProxyService::class.java))
+                            val stopIntent = Intent(this@MainActivity, ProxyService::class.java).apply {
+                                action = "STOP"
+                            }
+                            startService(stopIntent)
                             isRunning = false
                         } else {
                             val vpnIntent = VpnService.prepare(this@MainActivity)

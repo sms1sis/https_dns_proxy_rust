@@ -1,4 +1,3 @@
-use log::LevelFilter;
 use std::net::{SocketAddr, IpAddr};
 use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
@@ -206,11 +205,14 @@ pub mod jni_api {
         _class: JClass,
     ) {
         #[cfg(target_os = "android")]
-        android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(LevelFilter::Debug)
-                .with_tag("https_dns_proxy"),
-        );
+        {
+            use log::LevelFilter;
+            android_logger::init_once(
+                android_logger::Config::default()
+                    .with_max_level(LevelFilter::Debug)
+                    .with_tag("https_dns_proxy"),
+            );
+        }
     }
 
     #[no_mangle]
