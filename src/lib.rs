@@ -234,7 +234,7 @@ pub mod jni_api {
             tcp_client_limit: 20,
             bootstrap_dns,
             polling_interval: 120,
-            force_ipv4: false,
+            force_ipv4: true,
             resolver_url,
             proxy_server: None,
             source_addr: None,
@@ -346,7 +346,7 @@ fn create_client(config: &Config, resolve_override: Option<(String, SocketAddr)>
         builder = builder.resolve(&domain, addr);
     }
 
-    Ok(builder.build()?)
+    Ok(builder.no_proxy().build()?)
 }
 
 async fn handle_udp_query(
@@ -364,6 +364,8 @@ async fn handle_udp_query(
         }
         Err(e) => {
             stats.errors.fetch_add(1, Ordering::Relaxed);
+            // Log the full error chain for debugging
+            debug!("UDP error from {}: {:#}", peer, e);
             Err(e)
         }
     }

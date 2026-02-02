@@ -12,7 +12,7 @@ jni = ["dep:jni", "dep:tokio-util"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["rustls-tls-manual-roots", "socks", "http2", "http3"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls-webpki-roots", "socks", "http2", "http3"], default-features = false }
 clap = { version = "4", features = ["derive"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
