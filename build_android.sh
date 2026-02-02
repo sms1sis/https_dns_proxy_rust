@@ -8,19 +8,26 @@ export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865
 TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
 export PATH=$TOOLCHAIN:$PATH
 
-# Define targets
-TARGETS=("aarch64-linux-android")
-export RUSTFLAGS="--cfg reqwest_unstable"
+# Define target - focusing ONLY on arm64-v8a (ARMv8-A)
+TARGET="aarch64-linux-android"
+
+# Optimization flags for ARMv8-A
+export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon,+fp-armv8 --cfg reqwest_unstable"
 
 echo "Using NDK from: $ANDROID_NDK_HOME"
+echo "Building for ARMv8-A (arm64-v8a)..."
 
-for TARGET in "${TARGETS[@]}"; do
-    echo "--------------------------------------------------"
-    echo "Building for $TARGET..."
+# Ensure cargo-ndk is installed
+if ! command -v cargo-ndk &> /dev/null; then
+    echo "cargo-ndk not found, installing..."
+    cargo install cargo-ndk
+fi
 
-    # Use --platform instead of -p to avoid confusion with --package
-    cargo ndk --target "$TARGET" --platform 21 build --release --lib --features jni
-done
+echo "--------------------------------------------------"
+echo "Building for $TARGET..."
+
+# Build with JNI feature
+cargo ndk --target "$TARGET" --platform 26 build --release --lib --features jni
 
 echo "--------------------------------------------------"
 echo "Build complete! Collecting libraries..."
@@ -29,6 +36,6 @@ echo "Build complete! Collecting libraries..."
 OUTPUT_DIR="android/app/src/main/jniLibs"
 mkdir -p "$OUTPUT_DIR/arm64-v8a"
 
-cp target/aarch64-linux-android/release/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/arm64-v8a/"
+cp target/$TARGET/release/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/arm64-v8a/"
 
 echo "All libraries collected in $OUTPUT_DIR/"

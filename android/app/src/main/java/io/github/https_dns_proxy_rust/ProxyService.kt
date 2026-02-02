@@ -36,28 +36,12 @@ class ProxyService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val listenAddr = "127.0.0.1"
+        val listenAddr = "0.0.0.0"
         val listenPort = intent?.getIntExtra("listenPort", 5053) ?: 5053
         val resolverUrl = intent?.getStringExtra("resolverUrl") ?: "https://dns.google/dns-query"
         val bootstrapDns = intent?.getStringExtra("bootstrapDns") ?: "8.8.8.8,1.1.1.1"
 
-        // 1. Establish VPN Interface to capture DNS traffic
-        try {
-            vpnInterface = Builder()
-                .setSession("SafeDNS")
-                .addAddress("10.0.0.2", 24)
-                .addDnsServer(listenAddr) // Point DNS to local proxy
-                .addRoute("0.0.0.0", 0)    // Route all traffic through VPN to ensure DNS is captured
-                .establish()
-            
-            Log.d(TAG, "VPN Interface established")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to establish VPN", e)
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        // 2. Start Foreground Notification
+        // 1. Start Foreground Notification IMMEDIATELY
         val mainActivityIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this, 0, mainActivityIntent,
@@ -72,7 +56,31 @@ class ProxyService : VpnService() {
             .setOngoing(true)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        // 2. Establish VPN Interface to capture DNS traffic
+        try {
+            vpnInterface = Builder()
+                .setSession("SafeDNS")
+                .addAddress("10.0.0.2", 24)
+                .addDnsServer("10.0.0.2") // Point DNS to the VPN interface where our proxy will listen
+                .addRoute("0.0.0.0", 0)    // Route all traffic through VPN to ensure DNS is captured
+                .establish()
+            
+            Log.d(TAG, "VPN Interface established")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to establish VPN", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         // 3. Start the Rust proxy in a separate thread
         thread {
