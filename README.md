@@ -1,62 +1,50 @@
-# https_dns_proxy_rust
+# SafeDNS (https_dns_proxy_rust)
 
-A lightweight, asynchronous DNS-to-HTTPS (DoH) proxy written in Rust.
+A lightweight, asynchronous DNS-over-HTTPS (DoH) proxy written in Rust, featuring a premium Android application.
 
-This project is a Rust implementation of the [original C-based https-dns-proxy](https://github.com/stangri/https-dns-proxy) by [stangri](https://github.com/stangri).
+This project is a modern, memory-safe Rust implementation of the original C-based https-dns-proxy, fully compliant with RFC 8484.
 
-## Features
+## 📱 SafeDNS Android (Pro v0.2.0)
 
-- **UDP & TCP Support**: Listen for DNS queries on both protocols.
-- **Asynchronous**: Built with [Tokio](https://tokio.rs/) for high performance.
-- **DoH Forwarding**: Uses [reqwest](https://docs.rs/reqwest/) to tunnel queries over HTTPS (RFC 8484).
+SafeDNS includes a feature-rich Android app (arm64-v8a) that provides an encrypted tunnel for all your DNS traffic without requiring root.
 
-## Usage
+### Features
+- **One-Tap Connection:** Merged status & power button for instant protection.
+- **Premium UI:** Modern, compact dashboard with dynamic pulsating animations.
+- **AMOLED Theme:** Pure black theme for battery savings on OLED screens.
+- **DNS Profiles:** Pre-configured support for Cloudflare, Google, AdGuard, and Quad9.
+- **Real-time Metrics:** Live latency (ms) tracking with a configurable heartbeat interval.
+- **Activity Logs:** Chronological DNS query logs with auto-scroll and export-to-file capability.
+- **Smart Routing:** Split-tunneling via `VpnService` to ensure global internet stability.
+- **Auto-Start:** Automatically resume protection after device reboot.
+- **Quick Settings:** Toggle DNS protection directly from the Android notification shade.
+
+## 💻 CLI Usage (Rust Core)
 
 ### Build
-
 ```bash
 cargo build --release
 ```
 
-### Cross-Compilation (Advanced)
-
-Use the unified management script to setup environments and build for multiple architectures (statically linked with musl).
-
-#### Prerequisites for `manage.sh`
-Before running the script on a fresh Linux environment, ensure you have the following installed:
-- **OS:** x86_64 Linux host
-- **Tools:** `curl`, `tar`, `git`, and `build-essential` (or equivalent development tools)
-
-Example for Ubuntu/Debian:
+### Build for Android (Local)
+Requires Android NDK and `cargo-ndk`.
 ```bash
-sudo apt update && sudo apt install build-essential curl git
+./build_android.sh
 ```
 
-#### Usage
+### Run (CLI)
 ```bash
-# Setup environment (downloads toolchains, configures rustup locally)
-./manage.sh setup all       # Setup for all architectures (arm64)
-
-# Build binaries
-./manage.sh build all       # Build all architectures (arm64)
-./manage.sh build arm64     # Build only for arm64
+./target/release/https_dns_proxy_rust -p 5053 -r https://cloudflare-dns.com/dns-query
 ```
 
-Supported architectures: `arm64`.
-
-### Run
-
-```bash
-./target/release/https_dns_proxy_rust --help
-
-# Example: Listen on port 5053, use Google DoH
-./target/release/https_dns_proxy_rust -p 5053 -r https://dns.google/dns-query
-```
-
-## Configuration
+## 🛠 Configuration (CLI)
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-a`, `--listen-addr` | Address to bind to | 127.0.0.1 |
 | `-p`, `--listen-port` | Port to bind to | 5053 |
-| `-r`, `--resolver-url` | DoH Resolver URL | https://dns.google/dns-query |
+| `-r`, `--resolver-url` | DoH Resolver URL | https://cloudflare-dns.com/dns-query |
+| `-b`, `--bootstrap-dns` | Bootstrap DNS IPs | 1.1.1.1 |
+
+---
+Created by **sms1sis**. Project repo: [https_dns_proxy_rust](https://github.com/sms1sis/https_dns_proxy_rust/tree/android-app)

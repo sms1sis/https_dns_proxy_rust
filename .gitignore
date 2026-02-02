@@ -1,19 +1,36 @@
-/target
+# Rust / Cargo
+/target/
 /local-rust
 /toolchains
+Cargo.lock.tmp
+**/*.rs.bk
 
 # Android / Gradle
 android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+android/.kotlin/
+*.apk
+*.ap_
+*.dex
+*.class
 
 # Memory dumps (from crashes)
 android/*.hprof
 
 # IDEs
 android/.idea/
-.DS_Store
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
 
-# Note: Usually, you WANT to keep 'gradlew' and 'gradle/wrapper' 
-# so others can build the project without installing Gradle manually.
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+SafeDNS_Logs_*.txt
