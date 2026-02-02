@@ -35,15 +35,14 @@ sudo apt update && sudo apt install build-essential curl git
 #### Usage
 ```bash
 # Setup environment (downloads toolchains, configures rustup locally)
-./manage.sh setup all       # Setup for all architectures
-./manage.sh setup mips      # Setup only for MIPS
+./manage.sh setup all       # Setup for all architectures (arm64)
 
 # Build binaries
-./manage.sh build all       # Build all architectures
-./manage.sh build x86_64    # Build only for x86_64
+./manage.sh build all       # Build all architectures (arm64)
+./manage.sh build arm64     # Build only for arm64
 ```
 
-Supported architectures: `x86_64`, `x86`, `arm64`, `armv7`, `mips`.
+Supported architectures: `arm64`.
 
 ### Run
 

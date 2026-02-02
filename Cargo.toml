@@ -35,11 +35,3 @@ lto = true            # Enable Link Time Optimization
 codegen-units = 1     # Reduce parallel code generation for better optimization
 panic = "abort"       # Abort on panic to remove stack unwinding code
 strip = true          # Automatically strip symbols from the binary
-
-[profile.release-mips]
-inherits = "release"
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true

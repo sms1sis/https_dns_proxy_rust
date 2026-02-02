@@ -15,7 +15,7 @@ To build the shared library for Android, you'll need the Android NDK installed a
 
 ```bash
 # Add targets
-rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+rustup target add aarch64-linux-android
 
 # Build for aarch64 (64-bit ARM)
 cargo build --release --target aarch64-linux-android --features jni

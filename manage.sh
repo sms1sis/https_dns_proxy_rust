@@ -11,16 +11,12 @@ export PATH="$CARGO_HOME/bin:$PATH"
 # Architecture Mapping: "ID|RustTarget|ToolchainName|URLSuffix"
 # ID is the short name used in arguments (e.g., mips)
 ARCH_MAP=(
-    "x86_64|x86_64-unknown-linux-musl|x86_64-linux-musl|x86_64-linux-musl-cross.tgz"
-    "x86|i686-unknown-linux-musl|i686-linux-musl|i686-linux-musl-cross.tgz"
     "arm64|aarch64-unknown-linux-musl|aarch64-linux-musl|aarch64-linux-musl-cross.tgz"
-    "armv7|armv7-unknown-linux-musleabihf|armv7l-linux-musleabihf|armv7l-linux-musleabihf-cross.tgz"
-    "mips|mips-unknown-linux-musl|mips-linux-musl|mips-linux-musl-cross.tgz"
 )
 
 usage() {
     echo "Usage: $0 [setup|build] [arch|all]"
-    echo "Architectures: x86_64, x86, arm64, armv7, mips"
+    echo "Architectures: arm64"
     exit 1
 }
 
@@ -30,9 +26,6 @@ setup_rust() {
         mkdir -p "$RUSTUP_DIR"
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
     fi
-    # MIPS requires nightly for build-std (Tier 3)
-    rustup toolchain install nightly
-    rustup component add rust-src --toolchain nightly
 }
 
 setup_arch() {
@@ -52,9 +45,7 @@ setup_arch() {
             fi
             
             # Add Target
-            if [ "$id" != "mips" ]; then
-                rustup target add "$target"
-            fi
+            rustup target add "$target"
             
             # Configure Cargo
             mkdir -p .cargo
@@ -85,12 +76,7 @@ build_arch() {
             export CXX_${TARGET_ENV}="$TOOLCHAIN_DIR/${name}-cross/bin/${name}-g++"
             export AR_${TARGET_ENV}="$TOOLCHAIN_DIR/${name}-cross/bin/${name}-ar"
             
-            if [ "$id" == "mips" ]; then
-                # Tier 3 targets like MIPS musl need build-std
-                cargo +nightly build -Z build-std=std,panic_abort --target "$target" --profile release-mips
-            else
-                cargo build --release --target "$target"
-            fi
+            cargo build --release --target "$target"
         fi
     done
 }
