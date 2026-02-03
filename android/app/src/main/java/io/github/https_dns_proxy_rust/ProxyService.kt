@@ -286,7 +286,7 @@ class ProxyService : VpnService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SafeDNS Active")
             .setContentText("Protecting DNS queries")
-            .setSmallIcon(android.R.drawable.ic_dialog_info) // Monochrome icon for status bar
+            .setSmallIcon(R.drawable.ic_stat_shield) // Custom monochrome shield icon
             .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)) // App icon for drawer
             .setContentIntent(pendingIntent)
             .setOngoing(true)
