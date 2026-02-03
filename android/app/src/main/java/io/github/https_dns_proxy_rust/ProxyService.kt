@@ -280,7 +280,7 @@ class ProxyService : VpnService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SafeDNS Active")
             .setContentText("Protecting DNS queries")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true).build()
         startForeground(NOTIFICATION_ID, notification)
     }
