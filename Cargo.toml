@@ -1,7 +1,7 @@
 [package]
 name = "https_dns_proxy_rust"
 version = "0.2.2"
-edition = "2021"
+edition = "2024"
 authors = ["sms1sis <sadimsajid2004@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/sms1sis/https_dns_proxy_rust"
@@ -17,7 +17,7 @@ jni = ["dep:jni", "dep:tokio-util"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["rustls-tls-webpki-roots", "socks", "http2", "http3"], default-features = false }
+reqwest = { version = "0.13", features = ["rustls", "socks", "http2", "http3"], default-features = false }
 clap = { version = "4", features = ["derive"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -25,12 +25,12 @@ tracing-appender = "0.2"
 anyhow = "1"
 bytes = "1"
 futures-util = "0.3"
-trust-dns-resolver = "0.23.2"
+hickory-resolver = "0.25"
 nix = { version = "0.29", features = ["user", "fs"] }
 daemonize = "0.5"
-lazy_static = "1.5.0"
 chrono = "0.4"
-android_logger = "0.14"
+android_logger = "0.15"
+moka = { version = "0.12", features = ["future"] }
 jni = { version = "0.21", optional = true }
 tokio-util = { version = "0.7", optional = true }
 log = "0.4"

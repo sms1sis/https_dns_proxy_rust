@@ -95,7 +95,7 @@ struct Args {
     statistic_interval: u64,
 
     /// Print versions and exit
-    #[arg(short = 'V', long)]
+    #[arg(short = 'P', long)]
     print_version: bool,
 }
 
