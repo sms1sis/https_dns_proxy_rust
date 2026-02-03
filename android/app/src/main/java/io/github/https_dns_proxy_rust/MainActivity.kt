@@ -1,11 +1,14 @@
 package io.github.https_dns_proxy_rust
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -146,6 +149,38 @@ class MainActivity : ComponentActivity() {
         var showAboutDialog by remember { mutableStateOf(false) }
         val uriHandler = LocalUriHandler.current
 
+        val powerManager = remember { context.getSystemService(Context.POWER_SERVICE) as PowerManager }
+        var isIgnoringBatteryOptimizations by remember {
+            mutableStateOf(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    powerManager.isIgnoringBatteryOptimizations(context.packageName)
+                } else true
+            )
+        }
+
+        val batteryOptimizationLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) {
+            isIgnoringBatteryOptimizations = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                powerManager.isIgnoringBatteryOptimizations(context.packageName)
+            } else true
+        }
+
+        fun requestBatteryOptimization() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = android.net.Uri.parse("package:${context.packageName}")
+                    }
+                    batteryOptimizationLauncher.launch(intent)
+                } catch (e: Exception) {
+                    // Fallback to settings page if direct request fails
+                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    batteryOptimizationLauncher.launch(intent)
+                }
+            }
+        }
+
         val permissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { isGranted ->
@@ -158,6 +193,15 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                     permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+
+            // Inform the user about battery optimization via Toast on first run
+            if (!isIgnoringBatteryOptimizations) {
+                val hasPrompted = prefs.getBoolean("battery_prompted", false)
+                if (!hasPrompted) {
+                    android.widget.Toast.makeText(context, "Disable battery optimization in Settings for better reliability", android.widget.Toast.LENGTH_LONG).show()
+                    prefs.edit().putBoolean("battery_prompted", true).apply()
                 }
             }
             
@@ -254,6 +298,8 @@ class MainActivity : ComponentActivity() {
                         },
                         onHeartbeatDomainChange = { pendingHeartbeatDomain = it },
                         onHeartbeatIntervalChange = { pendingHeartbeatInterval = it },
+                        isIgnoringBatteryOptimizations = isIgnoringBatteryOptimizations,
+                        onRequestBatteryOptimization = { requestBatteryOptimization() },
                         onAboutClick = { showAboutDialog = true },
                         onClose = { scope.launch { drawerState.close() } }
                     )
@@ -554,6 +600,8 @@ class MainActivity : ComponentActivity() {
         onHeartbeatChange: (Boolean) -> Unit,
         onHeartbeatDomainChange: (String) -> Unit,
         onHeartbeatIntervalChange: (String) -> Unit,
+        isIgnoringBatteryOptimizations: Boolean,
+        onRequestBatteryOptimization: () -> Unit,
         onAboutClick: () -> Unit,
         onClose: () -> Unit
     ) {
@@ -576,6 +624,28 @@ class MainActivity : ComponentActivity() {
             
             Text("Service", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(16.dp))
+
+            if (!isIgnoringBatteryOptimizations) {
+                Surface(
+                    onClick = onRequestBatteryOptimization,
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.BatteryAlert, null, tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(16.dp))
+                        Column {
+                            Text("Battery Optimization", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onErrorContainer)
+                            Text("Service might be killed in background. Tap to fix.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
             
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
