@@ -8,7 +8,7 @@
 *   **Runtime:** Tokio (Async I/O)
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 
-## Recent Android Updates (v0.2.1)
+## Recent Android Updates (v0.2.2)
 
 *   **JNI Integration:** The Rust proxy is now built as a shared library (`.so`) and called via JNI from the Android `ProxyService`.
 *   **VpnService Engine:** Implemented a manual IPv4/UDP packet forwarder that intercepts DNS traffic and tunnels it through the Rust DoH proxy.
