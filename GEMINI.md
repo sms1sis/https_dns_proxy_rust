@@ -8,14 +8,14 @@
 *   **Runtime:** Tokio (Async I/O)
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 
-## Recent Android Updates (v0.2.2)
+## Recent Android Updates (v0.3.0)
 
-*   **JNI Integration:** The Rust proxy is now built as a shared library (`.so`) and called via JNI from the Android `ProxyService`.
-*   **VpnService Engine:** Implemented a manual IPv4/UDP packet forwarder that intercepts DNS traffic and tunnels it through the Rust DoH proxy.
-*   **Latency Heartbeat:** A background thread performs periodic DNS queries to provide real-time latency (ms) metrics.
-*   **Chronological Logging:** Rust backend logs are exposed via JNI to a live, auto-scrolling activity feed in the UI.
-*   **AMOLED Theme:** Pure black background support for OLED efficiency.
-*   **Persistence:** All settings are stored in `SharedPreferences` for continuity across restarts.
+*   **Rust 2024 Edition:** Core engine upgraded to Rust Edition 2024 using `std::sync::LazyLock` and modern asynchronous patterns.
+*   **IPv6 Support:** Implemented mandatory IPv6 UDP checksum calculation using the IPv6 pseudo-header for full DNS interception support.
+*   **Native TLS Verification:** Integrated `rustls-platform-verifier` via JNI to use the Android system's native CA trust store, fixing SSL connectivity issues.
+*   **DNS Caching:** Added a high-performance `moka` cache with user-configurable TTL and a manual "Clear Cache" UI action.
+*   **Dynamic Builds:** Replaced hardcoded paths in `settings.gradle` with dynamic `cargo metadata` lookups for portable cross-compilation.
+*   **Bind Reliability:** Implemented a retry loop (5 attempts) for socket binding to prevent "Address already in use" errors during rapid proxy restarts.
 
 ## Directory Structure
 
