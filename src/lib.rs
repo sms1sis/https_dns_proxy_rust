@@ -434,7 +434,7 @@ async fn handle_tcp_query(
     }
 }
 
-async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Vec<u8>, stats: Arc<Stats>) -> Result<Vec<u8>> {
+async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Vec<u8>, _stats: Arc<Stats>) -> Result<Vec<u8>> {
     let start = std::time::Instant::now();
     let domain = if data.len() > 12 {
         let mut d = String::new();
