@@ -48,9 +48,13 @@ static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|
 
 #[cfg(feature = "jni")]
 static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+#[cfg(feature = "jni")]
+static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
+
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
 
 fn add_query_log(domain: String, status: String) {
+    debug!("QUERY: {} -> {}", domain, status);
     let _ = LOG_SENDER.send(LogMessage { domain, status });
 }
 
@@ -72,6 +76,7 @@ pub struct Config {
     pub bootstrap_dns: String,
     pub polling_interval: u64,
     pub force_ipv4: bool,
+    pub allow_ipv6: bool,
     pub resolver_url: String,
     pub proxy_server: Option<String>,
     pub source_addr: Option<String>,
@@ -81,6 +86,7 @@ pub struct Config {
     pub conn_loss_time: u64,
     pub ca_path: Option<String>,
     pub statistic_interval: u64,
+    pub cache_ttl: u64,
 }
 
 type DnsCache = Cache<Bytes, Bytes>;
@@ -94,12 +100,36 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         .context("Failed to parse resolver URL")?;
     let resolver_domain = resolver_url_parsed.domain().context("Resolver URL must have a domain")?.to_string();
 
-    let udp_socket = Arc::new(UdpSocket::bind(addr).await.context("Failed to bind UDP socket")?);
-    let tcp_listener = TcpListener::bind(addr).await.context("Failed to bind TCP listener")?;
+    // Retry binding to handle transient port conflicts during restarts
+    let mut udp_socket = None;
+    let mut tcp_listener = None;
+    for i in 0..5 {
+        match UdpSocket::bind(addr).await {
+            Ok(s) => {
+                match TcpListener::bind(addr).await {
+                    Ok(l) => {
+                        udp_socket = Some(Arc::new(s));
+                        tcp_listener = Some(l);
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Failed to bind TCP listener (attempt {}): {}", i + 1, e);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to bind UDP socket (attempt {}): {}", i + 1, e);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let udp_socket = udp_socket.context("Failed to bind UDP socket after retries")?;
+    let tcp_listener = tcp_listener.context("Failed to bind TCP listener after retries")?;
 
     info!("Listening on UDP/TCP {} -> {}", addr, config.resolver_url);
 
-    let ip = resolve_bootstrap(&resolver_domain, &config.bootstrap_dns, config.force_ipv4).await?;
+    let ip = resolve_bootstrap(&resolver_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
     info!("Bootstrapped {} to {}", resolver_domain, ip);
     let client = create_client(&config, Some((resolver_domain.clone(), ip)))?;
 
@@ -107,11 +137,16 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let resolver_url_str = Arc::new(config.resolver_url.clone());
     
     // DNS Cache: 2048 entries, TTL handled manually or by moka. 
-    // We use a small TTL as default if we don't parse it from packet.
     let cache: DnsCache = Cache::builder()
         .max_capacity(2048)
-        .time_to_live(Duration::from_secs(300)) // 5 min default TTL
+        .time_to_live(Duration::from_secs(config.cache_ttl))
         .build();
+
+    #[cfg(feature = "jni")]
+    {
+        let mut w = GLOBAL_CACHE.write().await;
+        *w = Some(cache.clone());
+    }
 
     // Bootstrap Refresh Loop
     let bootstrap_handle = {
@@ -122,7 +157,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
             let mut interval = tokio::time::interval(Duration::from_secs(config.polling_interval));
             loop {
                 interval.tick().await;
-                match resolve_bootstrap(&domain, &config.bootstrap_dns, config.force_ipv4).await {
+                match resolve_bootstrap(&domain, &config.bootstrap_dns, config.allow_ipv6).await {
                     Ok(new_ip) => {
                         debug!("Refreshed bootstrap IP for {}: {}", domain, new_ip);
                         match create_client(&config, Some((domain.clone(), new_ip))) {
@@ -216,7 +251,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 pub mod jni_api {
     use super::*;
     use jni::JNIEnv;
-    use jni::objects::{JClass, JString};
+    use jni::objects::{JClass, JObject, JString};
     use jni::sys::jint;
     use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
@@ -226,8 +261,9 @@ pub mod jni_api {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_initLogger(
-        _env: JNIEnv,
+        mut env: JNIEnv,
         _class: JClass,
+        context: JObject,
     ) {
         #[cfg(target_os = "android")]
         {
@@ -237,6 +273,11 @@ pub mod jni_api {
                     .with_max_level(LevelFilter::Debug)
                     .with_tag("https_dns_proxy"),
             );
+
+            match rustls_platform_verifier::android::init_hosted(&mut env, context) {
+                Ok(_) => log::info!("Platform verifier initialized successfully"),
+                Err(e) => log::error!("Failed to init platform verifier: {:?}", e),
+            }
         }
     }
 
@@ -248,10 +289,13 @@ pub mod jni_api {
         listen_port: jint,
         resolver_url: JString,
         bootstrap_dns: JString,
+        allow_ipv6: jni::sys::jboolean,
+        cache_ttl: jni::sys::jlong,
     ) -> jint {
         let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
         let resolver_url: String = env.get_string(&resolver_url).unwrap().into();
         let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
+        let allow_ipv6 = allow_ipv6 != 0;
 
         let config = Config {
             listen_addr,
@@ -259,7 +303,8 @@ pub mod jni_api {
             tcp_client_limit: 20,
             bootstrap_dns,
             polling_interval: 120,
-            force_ipv4: true,
+            force_ipv4: !allow_ipv6,
+            allow_ipv6,
             resolver_url,
             proxy_server: None,
             source_addr: None,
@@ -269,6 +314,7 @@ pub mod jni_api {
             conn_loss_time: 15,
             ca_path: None,
             statistic_interval: 0,
+            cache_ttl: cache_ttl as u64,
         };
 
         let token = CancellationToken::new();
@@ -345,9 +391,22 @@ pub mod jni_api {
             token.cancel();
         }
     }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_clearCache(
+        _env: JNIEnv,
+        _class: JClass,
+    ) {
+        RUNTIME.spawn(async {
+            if let Some(cache) = &*GLOBAL_CACHE.read().await {
+                cache.invalidate_all();
+                debug!("DNS Cache cleared via JNI");
+            }
+        });
+    }
 }
 
-async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, force_ipv4: bool) -> Result<SocketAddr> {
+async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) -> Result<SocketAddr> {
     let servers: Vec<SocketAddr> = bootstrap_dns
         .split(',')
         .map(|s| {
@@ -367,20 +426,21 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, force_ipv4: bool) 
     }
 
     let mut opts = ResolverOpts::default();
-    if force_ipv4 {
-        opts.ip_strategy = hickory_resolver::config::LookupIpStrategy::Ipv4Only;
-    }
+    // For bootstrapping the proxy itself, we prefer IPv4 to avoid "Network unreachable" on IPv4-only networks
+    // even if we are intercepting IPv6 DNS traffic.
+    opts.ip_strategy = if allow_ipv6 {
+        hickory_resolver::config::LookupIpStrategy::Ipv4thenIpv6
+    } else {
+        hickory_resolver::config::LookupIpStrategy::Ipv4Only
+    };
 
     let resolver = TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
         .with_options(opts)
         .build();
     let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider")?;
     
-    let ip = if force_ipv4 {
-        ips.iter().find(|ip| ip.is_ipv4()).ok_or_else(|| anyhow::anyhow!("No IPv4 found"))?
-    } else {
-        ips.iter().next().ok_or_else(|| anyhow::anyhow!("No IPs found"))?
-    };
+    // Prefer IPv4 for the same reason
+    let ip = ips.iter().find(|ip| ip.is_ipv4()).or_else(|| ips.iter().find(|ip| ip.is_ipv6())).ok_or_else(|| anyhow::anyhow!("No IPs found"))?;
     
     Ok(SocketAddr::new(ip, 443))
 }

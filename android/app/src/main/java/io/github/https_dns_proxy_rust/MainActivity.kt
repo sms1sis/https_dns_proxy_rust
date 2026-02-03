@@ -136,6 +136,8 @@ class MainActivity : ComponentActivity() {
         var latency by remember { mutableStateOf(0) }
         var logs by remember { mutableStateOf(emptyArray<String>()) }
         var autoStart by remember { mutableStateOf(prefs.getBoolean("auto_start", false)) }
+        var allowIpv6 by remember { mutableStateOf(prefs.getBoolean("allow_ipv6", false)) }
+        var cacheTtl by remember { mutableStateOf(prefs.getString("cache_ttl", "300") ?: "300") }
         var heartbeatEnabled by remember { mutableStateOf(prefs.getBoolean("heartbeat_enabled", true)) }
         var heartbeatDomain by remember { mutableStateOf(prefs.getString("heartbeat_domain", "google.com") ?: "google.com") }
         var heartbeatInterval by remember { mutableStateOf(prefs.getString("heartbeat_interval", "10") ?: "10") }
@@ -143,6 +145,7 @@ class MainActivity : ComponentActivity() {
         // Debounced heartbeat settings
         var pendingHeartbeatDomain by remember { mutableStateOf(heartbeatDomain) }
         var pendingHeartbeatInterval by remember { mutableStateOf(heartbeatInterval) }
+        var pendingCacheTtl by remember { mutableStateOf(cacheTtl) }
 
         val profiles = listOf(
             DnsProfile("Cloudflare", "https://cloudflare-dns.com/dns-query", "1.1.1.1"),
@@ -240,7 +243,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // Debounce effect for all settings
-        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort) {
+        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl) {
             delay(1500) // Wait for 1.5s after user stops typing
             
             var changed = false
@@ -249,6 +252,7 @@ class MainActivity : ComponentActivity() {
             if (resolverUrl != pendingResolverUrl) { resolverUrl = pendingResolverUrl; changed = true }
             if (bootstrapDns != pendingBootstrapDns) { bootstrapDns = pendingBootstrapDns; changed = true }
             if (listenPort != pendingListenPort) { listenPort = pendingListenPort; changed = true }
+            if (cacheTtl != pendingCacheTtl) { cacheTtl = pendingCacheTtl; changed = true }
 
             if (changed) {
                 prefs.edit()
@@ -257,11 +261,13 @@ class MainActivity : ComponentActivity() {
                     .putString("resolver_url", resolverUrl)
                     .putString("bootstrap_dns", bootstrapDns)
                     .putString("listen_port", listenPort)
+                    .putBoolean("allow_ipv6", allowIpv6)
+                    .putString("cache_ttl", cacheTtl)
                     .putInt("selected_profile", selectedProfileIndex)
                     .apply()
                 
                 if (isRunning) {
-                    startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                 }
             }
         }
@@ -270,7 +276,7 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == RESULT_OK) {
-                startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                 isRunning = true
             }
         }
@@ -288,7 +294,7 @@ class MainActivity : ComponentActivity() {
                 val vpnIntent = VpnService.prepare(context)
                 if (vpnIntent != null) vpnPermissionLauncher.launch(vpnIntent)
                 else {
-                    startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                     isRunning = true
                 }
             }
@@ -301,6 +307,8 @@ class MainActivity : ComponentActivity() {
                     DrawerContent(
                         themeMode = themeMode,
                         autoStart = autoStart,
+                        allowIpv6 = allowIpv6,
+                        cacheTtl = pendingCacheTtl,
                         heartbeatEnabled = heartbeatEnabled,
                         heartbeatDomain = pendingHeartbeatDomain,
                         heartbeatInterval = pendingHeartbeatInterval,
@@ -311,11 +319,19 @@ class MainActivity : ComponentActivity() {
                             autoStart = it
                             prefs.edit().putBoolean("auto_start", it).apply()
                         },
+                        onAllowIpv6Change = { enabled ->
+                            allowIpv6 = enabled
+                            prefs.edit().putBoolean("allow_ipv6", enabled).apply()
+                            if (isRunning) {
+                                startProxyService(resolverUrl, listenPort, bootstrapDns, enabled, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                            }
+                        },
+                        onCacheTtlChange = { pendingCacheTtl = it },
                         onHeartbeatChange = { enabled ->
                             heartbeatEnabled = enabled
                             prefs.edit().putBoolean("heartbeat_enabled", enabled).apply()
                             if (isRunning) {
-                                startProxyService(resolverUrl, listenPort, bootstrapDns, enabled, heartbeatDomain, heartbeatInterval)
+                                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, enabled, heartbeatDomain, heartbeatInterval)
                             }
                         },
                         onHeartbeatDomainChange = { pendingHeartbeatDomain = it },
@@ -618,6 +634,8 @@ class MainActivity : ComponentActivity() {
     fun DrawerContent(
         themeMode: String,
         autoStart: Boolean,
+        allowIpv6: Boolean,
+        cacheTtl: String,
         heartbeatEnabled: Boolean,
         heartbeatDomain: String,
         heartbeatInterval: String,
@@ -625,6 +643,8 @@ class MainActivity : ComponentActivity() {
         notchMode: Boolean,
         onNotchModeChange: (Boolean) -> Unit,
         onAutoStartChange: (Boolean) -> Unit,
+        onAllowIpv6Change: (Boolean) -> Unit,
+        onCacheTtlChange: (String) -> Unit,
         onHeartbeatChange: (Boolean) -> Unit,
         onHeartbeatDomainChange: (String) -> Unit,
         onHeartbeatIntervalChange: (String) -> Unit,
@@ -633,6 +653,7 @@ class MainActivity : ComponentActivity() {
         onAboutClick: () -> Unit,
         onClose: () -> Unit
     ) {
+        val context = LocalContext.current
         Column(modifier = Modifier.padding(24.dp).verticalScroll(rememberScrollState())) {
             Text("Preferences", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(32.dp))
@@ -693,6 +714,29 @@ class MainActivity : ComponentActivity() {
             }
             
             Spacer(Modifier.height(24.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("IPv6 Support", fontWeight = FontWeight.Bold)
+                    Text("Enable IPv6 DNS interception", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = allowIpv6, onCheckedChange = onAllowIpv6Change)
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            Text("DNS Cache TTL (seconds)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = cacheTtl,
+                onValueChange = onCacheTtlChange,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+            )
+
+            Spacer(Modifier.height(24.dp))
             
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -724,6 +768,19 @@ class MainActivity : ComponentActivity() {
                 )
             }
             
+            Spacer(Modifier.height(16.dp))
+            NavigationDrawerItem(
+                label = { Text("Clear DNS Cache") },
+                selected = false,
+                icon = { Icon(Icons.Default.DeleteSweep, null) },
+                onClick = { 
+                    ProxyService.clearCache()
+                    android.widget.Toast.makeText(context, "DNS Cache Cleared", android.widget.Toast.LENGTH_SHORT).show()
+                    onClose() 
+                },
+                shape = RoundedCornerShape(16.dp)
+            )
+
             Spacer(Modifier.height(40.dp))
             NavigationDrawerItem(
                 label = { Text("About Application") },
@@ -1006,11 +1063,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String, heartbeatEnabled: Boolean, heartbeatDomain: String, heartbeatInterval: String) {
+    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: String, heartbeatEnabled: Boolean, heartbeatDomain: String, heartbeatInterval: String) {
         val intent = Intent(this, ProxyService::class.java).apply {
             putExtra("resolverUrl", resolverUrl)
             putExtra("listenPort", listenPort.toIntOrNull() ?: 5053)
             putExtra("bootstrapDns", bootstrapDns)
+            putExtra("allowIpv6", allowIpv6)
+            putExtra("cacheTtl", cacheTtl.toLongOrNull() ?: 300L)
             putExtra("heartbeatEnabled", heartbeatEnabled)
             putExtra("heartbeatDomain", heartbeatDomain)
             putExtra("heartbeatInterval", heartbeatInterval.toLongOrNull() ?: 10L)

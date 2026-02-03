@@ -1,0 +1,3 @@
+-keep class org.rustls.platformverifier.** { *; }
+-keep interface org.rustls.platformverifier.** { *; }
+-keep,includedescriptorclasses class org.rustls.platformverifier.** { *; }

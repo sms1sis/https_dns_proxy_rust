@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
         bootstrap_dns: args.bootstrap_dns,
         polling_interval: args.polling_interval,
         force_ipv4: args.force_ipv4,
+        allow_ipv6: !args.force_ipv4,
         resolver_url: args.resolver_url,
         proxy_server: args.proxy_server,
         source_addr: args.source_addr,

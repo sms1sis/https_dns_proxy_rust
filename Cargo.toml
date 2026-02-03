@@ -34,6 +34,7 @@ moka = { version = "0.12", features = ["future"] }
 jni = { version = "0.21", optional = true }
 tokio-util = { version = "0.7", optional = true }
 log = "0.4"
+rustls-platform-verifier = { version = "0.6", features = ["jni"] }
 
 [profile.release]
 opt-level = "s"       # Optimize for size and speed (balanced)

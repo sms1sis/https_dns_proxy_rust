@@ -746,6 +746,7 @@ dependencies = [
  "moka",
  "nix",
  "reqwest",
+ "rustls-platform-verifier",
  "tokio",
  "tokio-util",
  "tracing",

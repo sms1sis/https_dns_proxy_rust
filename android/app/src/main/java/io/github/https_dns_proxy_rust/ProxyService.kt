@@ -28,6 +28,7 @@ class ProxyService : VpnService() {
     private var runningPort: Int = 0
     private var runningUrl: String = ""
     private var runningBootstrap: String = ""
+    private var runningCacheTtl: Long = 0
 
     companion object {
         const val CHANNEL_ID = "ProxyServiceChannel"
@@ -42,14 +43,16 @@ class ProxyService : VpnService() {
         external fun getLatency(): Int
         @JvmStatic
         external fun getLogs(): Array<String>
+        @JvmStatic
+        external fun clearCache()
 
         init {
             System.loadLibrary("https_dns_proxy_rust")
         }
     }
 
-    private external fun initLogger()
-    private external fun startProxy(listenAddr: String, listenPort: Int, resolverUrl: String, bootstrapDns: String): Int
+    private external fun initLogger(context: Context)
+    private external fun startProxy(listenAddr: String, listenPort: Int, resolverUrl: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: Long): Int
     private external fun stopProxy()
 
     private var connectivityManager: android.net.ConnectivityManager? = null
@@ -62,7 +65,7 @@ class ProxyService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        initLogger()
+        initLogger(this)
         createNotificationChannel()
         connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
         connectivityManager?.registerDefaultNetworkCallback(networkCallback)
@@ -87,6 +90,12 @@ class ProxyService : VpnService() {
         
         val bootstrapDns = intent?.getStringExtra("bootstrapDns")
             ?: prefs.getString("bootstrap_dns", "1.1.1.1") ?: "1.1.1.1"
+
+        val allowIpv6 = intent?.getBooleanExtra("allowIpv6", prefs.getBoolean("allow_ipv6", false))
+            ?: prefs.getBoolean("allow_ipv6", false)
+        
+        val cacheTtl = intent?.getLongExtra("cacheTtl", -1L).takeIf { it != null && it != -1L }
+            ?: prefs.getString("cache_ttl", "300")?.toLongOrNull() ?: 300L
         
         val heartbeatEnabled = intent?.getBooleanExtra("heartbeatEnabled", prefs.getBoolean("heartbeat_enabled", true)) 
             ?: prefs.getBoolean("heartbeat_enabled", true)
@@ -100,7 +109,7 @@ class ProxyService : VpnService() {
         Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl, heartbeat=$heartbeatEnabled")
 
         if (vpnInterface != null) {
-            val configChanged = runningPort != listenPort || runningUrl != resolverUrl || runningBootstrap != bootstrapDns
+            val configChanged = runningPort != listenPort || runningUrl != resolverUrl || runningBootstrap != bootstrapDns || runningCacheTtl != cacheTtl
             
             if (configChanged) {
                 Log.d(TAG, "Dynamic config change detected. Restarting backend...")
@@ -109,11 +118,12 @@ class ProxyService : VpnService() {
                 runningPort = listenPort
                 runningUrl = resolverUrl
                 runningBootstrap = bootstrapDns
+                runningCacheTtl = cacheTtl
                 
                 thread {
-                    try { Thread.sleep(500) } catch (e: InterruptedException) {}
-                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
-                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns)
+                    try { Thread.sleep(1000) } catch (e: InterruptedException) {}
+                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort with TTL $cacheTtl")
+                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl)
                     Log.d(TAG, "Backend proxy initialized (result: $res)")
                     
                     if (heartbeatEnabled) {
@@ -136,10 +146,11 @@ class ProxyService : VpnService() {
         runningPort = listenPort
         runningUrl = resolverUrl
         runningBootstrap = bootstrapDns
+        runningCacheTtl = cacheTtl
 
         thread {
-            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
-            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns)
+            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort with TTL $cacheTtl")
+            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl)
         }
 
         try {
@@ -148,6 +159,13 @@ class ProxyService : VpnService() {
                 .addAddress("10.0.0.1", 32)
                 .addDnsServer("10.0.0.2") // Virtual DNS IP
                 .addRoute("10.0.0.2", 32) // Route only the virtual DNS IP
+                .apply {
+                    if (allowIpv6) {
+                        addAddress("fd00::1", 128)
+                        addDnsServer("fd00::2")
+                        addRoute("fd00::2", 128)
+                    }
+                }
                 .setBlocking(true)
                 .apply {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -157,7 +175,7 @@ class ProxyService : VpnService() {
                 }
                 .establish()
             
-            Log.d(TAG, "VPN Interface established")
+            Log.d(TAG, "VPN Interface established (IPv6: $allowIpv6)")
             thread { forwardPackets(listenPort) }
             
             if (heartbeatEnabled) {
@@ -229,11 +247,16 @@ class ProxyService : VpnService() {
                 val length = inputStream.read(packet.array())
                 if (length > 0) {
                     val data = packet.array()
-                    if ((data[0].toInt() and 0xF0) == 0x40 && data[9].toInt() == 17) {
+                    val version = (data[0].toInt() and 0xF0)
+                    
+                    if (version == 0x40 && data[9].toInt() == 17) { // IPv4 UDP
                         val ihl = (data[0].toInt() and 0x0F) * 4
                         val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
+                        if (dPort != 5053) { // Ignore local proxy traffic if it somehow leaks
+                             // Log.d(TAG, "IPv4 UDP packet: dPort=$dPort")
+                        }
                         if (dPort == 53) {
-                            Log.d(TAG, "Captured DNS packet, forwarding to proxy")
+                            Log.d(TAG, "Captured IPv4 DNS packet")
                             val dnsPayload = data.copyOfRange(ihl + 8, length)
                             udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                             val recvBuf = ByteArray(4096)
@@ -242,16 +265,100 @@ class ProxyService : VpnService() {
                             try {
                                 udpSocket.receive(recvPacket)
                                 outputStream.write(constructIpv4Udp(data, recvPacket.data, recvPacket.length))
-                                Log.d(TAG, "Received DNS response from proxy and wrote to VPN")
                             } catch (e: Exception) {
-                                Log.e(TAG, "Proxy timeout or error waiting for response", e)
+                                Log.e(TAG, "Proxy timeout (IPv4)", e)
                             }
+                        }
+                    } else if (version == 0x60) {
+                        val nextHeader = data[6].toInt() and 0xFF
+                        // Log.d(TAG, "IPv6 packet seen: nextHeader=$nextHeader")
+                        if (nextHeader == 17) { // UDP
+                            val dPort = ((data[42].toInt() and 0xFF) shl 8) or (data[43].toInt() and 0xFF)
+                            Log.d(TAG, "IPv6 UDP packet: dPort=$dPort")
+                            if (dPort == 53) {
+                                Log.d(TAG, "Captured IPv6 DNS packet")
+                                val dnsPayload = data.copyOfRange(48, length)
+                                udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
+                                val recvBuf = ByteArray(4096)
+                                val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
+                                udpSocket.soTimeout = 4000
+                                                            try {
+                                                                udpSocket.receive(recvPacket)
+                                                                Log.d(TAG, "Received IPv6 response from Rust: len=${recvPacket.length}")
+                                                                outputStream.write(constructIpv6Udp(data, recvPacket.data, recvPacket.length))
+                                                            } catch (e: Exception) {
+                                                                Log.e(TAG, "Proxy timeout (IPv6)", e)
+                                                            }                            }
                         }
                     }
                     packet.clear()
                 }
             }
         } catch (e: Exception) {}
+    }
+
+    private fun constructIpv6Udp(request: ByteArray, payload: ByteArray, payloadLen: Int): ByteArray {
+        val response = ByteArray(40 + 8 + payloadLen)
+        // Copy IPv6 header base
+        System.arraycopy(request, 0, response, 0, 40)
+        // Swap Source and Destination IPs (indices 8-23 and 24-39)
+        System.arraycopy(request, 24, response, 8, 16)
+        System.arraycopy(request, 8, response, 24, 16)
+        // Payload length in IPv6 header (UDP header + DNS payload)
+        val ipv6PayloadLen = 8 + payloadLen
+        response[4] = (ipv6PayloadLen shr 8).toByte()
+        response[5] = (ipv6PayloadLen and 0xFF).toByte()
+        // Swap UDP ports
+        response[40] = request[42]; response[41] = request[43]
+        response[42] = request[40]; response[43] = request[41]
+        // UDP length
+        response[44] = (ipv6PayloadLen shr 8).toByte()
+        response[45] = (ipv6PayloadLen and 0xFF).toByte()
+        
+        // Copy DNS payload
+        System.arraycopy(payload, 0, response, 48, payloadLen)
+
+        // UDP checksum (REQUIRED for IPv6)
+        val checksum = calculateIpv6UdpChecksum(response)
+        response[46] = (checksum shr 8).toByte()
+        response[47] = (checksum and 0xFF).toByte()
+
+        return response
+    }
+
+    private fun calculateIpv6UdpChecksum(packet: ByteArray): Int {
+        var sum: Long = 0
+        
+        // Pseudo-header: Source Address
+        for (i in 8..23 step 2) {
+            sum += (((packet[i].toInt() and 0xFF) shl 8) or (packet[i + 1].toInt() and 0xFF)).toLong()
+        }
+        // Pseudo-header: Destination Address
+        for (i in 24..39 step 2) {
+            sum += (((packet[i].toInt() and 0xFF) shl 8) or (packet[i + 1].toInt() and 0xFF)).toLong()
+        }
+        // Pseudo-header: UDP Length
+        sum += (((packet[4].toInt() and 0xFF) shl 8) or (packet[5].toInt() and 0xFF)).toLong()
+        // Pseudo-header: Next Header (17 for UDP)
+        sum += 17
+
+        // UDP Header + Payload
+        for (i in 40 until packet.size step 2) {
+            if (i == 46) continue // Skip checksum field itself
+            if (i + 1 < packet.size) {
+                sum += (((packet[i].toInt() and 0xFF) shl 8) or (packet[i + 1].toInt() and 0xFF)).toLong()
+            } else {
+                sum += ((packet[i].toInt() and 0xFF) shl 8).toLong()
+            }
+        }
+
+        while ((sum shr 16) > 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        
+        var res = (sum.inv() and 0xFFFF).toInt()
+        if (res == 0) res = 0xFFFF
+        return res
     }
 
     private fun constructIpv4Udp(request: ByteArray, payload: ByteArray, payloadLen: Int): ByteArray {
@@ -268,11 +375,15 @@ class ProxyService : VpnService() {
         System.arraycopy(payload, 0, response, ihl + 8, payloadLen)
         response[2] = (totalLen shr 8).toByte(); response[3] = (totalLen and 0xFF).toByte()
         response[10] = 0; response[11] = 0
-        var checksum = 0
-        for (i in 0 until ihl step 2) checksum += ((response[i].toInt() and 0xFF) shl 8) or (response[i + 1].toInt() and 0xFF)
-        while ((checksum shr 16) > 0) checksum = (checksum and 0xFFFF) + (checksum shr 16)
-        checksum = checksum.inv() and 0xFFFF
-        response[10] = (checksum shr 8).toByte(); response[11] = (checksum and 0xFF).toByte()
+        var checksum: Long = 0
+        for (i in 0 until ihl step 2) {
+            checksum += (((response[i].toInt() and 0xFF) shl 8) or (response[i + 1].toInt() and 0xFF)).toLong()
+        }
+        while ((checksum shr 16) > 0) {
+            checksum = (checksum and 0xFFFF) + (checksum shr 16)
+        }
+        val finalChecksum = (checksum.inv() and 0xFFFF).toInt()
+        response[10] = (finalChecksum shr 8).toByte(); response[11] = (finalChecksum and 0xFF).toByte()
         return response
     }
 
