@@ -34,3 +34,7 @@ Thumbs.db
 # Logs
 *.log
 SafeDNS_Logs_*.txt
+
+# Android Native Libraries (JNI)
+android/app/src/main/jniLibs/**/*.so
+android/app/src/main/jniLibs/**/*.a
