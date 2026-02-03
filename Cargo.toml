@@ -2,6 +2,11 @@
 name = "https_dns_proxy_rust"
 version = "0.2.0"
 edition = "2021"
+authors = ["sms1sis <sadimsajid2004@gmail.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/sms1sis/https_dns_proxy_rust"
+categories = ["os::android", "network-programming", "external-ffi-bindings"]
+keywords = ["dns", "doh", "android", "jni", "proxy"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
