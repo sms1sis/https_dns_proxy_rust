@@ -277,11 +277,20 @@ class ProxyService : VpnService() {
     }
 
     private fun startForegroundServiceNotification() {
+        val intent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        )
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SafeDNS Active")
             .setContentText("Protecting DNS queries")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true).build()
+            .setSmallIcon(android.R.drawable.ic_dialog_info) // Monochrome icon for status bar
+            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)) // App icon for drawer
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
         startForeground(NOTIFICATION_ID, notification)
     }
 
