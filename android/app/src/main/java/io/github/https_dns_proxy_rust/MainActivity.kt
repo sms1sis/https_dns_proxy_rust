@@ -95,6 +95,10 @@ class MainActivity : ComponentActivity() {
         var heartbeatDomain by remember { mutableStateOf(prefs.getString("heartbeat_domain", "google.com") ?: "google.com") }
         var heartbeatInterval by remember { mutableStateOf(prefs.getString("heartbeat_interval", "10") ?: "10") }
 
+        // Debounced heartbeat settings
+        var pendingHeartbeatDomain by remember { mutableStateOf(heartbeatDomain) }
+        var pendingHeartbeatInterval by remember { mutableStateOf(heartbeatInterval) }
+
         val profiles = listOf(
             DnsProfile("Cloudflare", "https://cloudflare-dns.com/dns-query", "1.1.1.1"),
             DnsProfile("Google", "https://dns.google/dns-query", "8.8.8.8"),
@@ -103,17 +107,31 @@ class MainActivity : ComponentActivity() {
             DnsProfile("Custom", "", "")
         )
         
-        var selectedProfileIndex by remember { mutableStateOf(0) }
-        var resolverUrl by remember { mutableStateOf(profiles[0].url) }
-        var bootstrapDns by remember { mutableStateOf(profiles[0].bootstrap) }
-        var listenPort by remember { mutableStateOf("5053") }
+        var selectedProfileIndex by remember { mutableStateOf(prefs.getInt("selected_profile", 0)) }
+        var resolverUrl by remember { mutableStateOf(prefs.getString("resolver_url", profiles[selectedProfileIndex].url) ?: profiles[selectedProfileIndex].url) }
+        var bootstrapDns by remember { mutableStateOf(prefs.getString("bootstrap_dns", profiles[selectedProfileIndex].bootstrap) ?: profiles[selectedProfileIndex].bootstrap) }
+        var listenPort by remember { mutableStateOf(prefs.getString("listen_port", "5053") ?: "5053") }
 
         val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         var showAboutDialog by remember { mutableStateOf(false) }
         val uriHandler = LocalUriHandler.current
 
+        val permissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted ->
+            if (!isGranted) {
+                Log.w("SafeDNS", "Notification permission denied")
+            }
+        }
+
         LaunchedEffect(Unit) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+            
             while (true) {
                 isRunning = ProxyService.isProxyRunning
                 if (isRunning) {
@@ -121,6 +139,23 @@ class MainActivity : ComponentActivity() {
                     logs = ProxyService.getLogs()
                 }
                 delay(1000)
+            }
+        }
+
+        // Debounce effect for heartbeat settings
+        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval) {
+            if (pendingHeartbeatDomain == heartbeatDomain && pendingHeartbeatInterval == heartbeatInterval) return@LaunchedEffect
+            
+            delay(1500) // Wait for 1.5s after user stops typing
+            
+            heartbeatDomain = pendingHeartbeatDomain
+            heartbeatInterval = pendingHeartbeatInterval
+            
+            prefs.edit().putString("heartbeat_domain", heartbeatDomain).apply()
+            prefs.edit().putString("heartbeat_interval", heartbeatInterval).apply()
+            
+            if (isRunning) {
+                startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
             }
         }
 
@@ -160,8 +195,8 @@ class MainActivity : ComponentActivity() {
                         themeMode = themeMode,
                         autoStart = autoStart,
                         heartbeatEnabled = heartbeatEnabled,
-                        heartbeatDomain = heartbeatDomain,
-                        heartbeatInterval = heartbeatInterval,
+                        heartbeatDomain = pendingHeartbeatDomain,
+                        heartbeatInterval = pendingHeartbeatInterval,
                         onThemeChange = onThemeChange,
                         onAutoStartChange = { 
                             autoStart = it
@@ -174,20 +209,8 @@ class MainActivity : ComponentActivity() {
                                 startProxyService(resolverUrl, listenPort, bootstrapDns, enabled, heartbeatDomain, heartbeatInterval)
                             }
                         },
-                        onHeartbeatDomainChange = { domain ->
-                            heartbeatDomain = domain
-                            prefs.edit().putString("heartbeat_domain", domain).apply()
-                            if (isRunning) {
-                                startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, domain, heartbeatInterval)
-                            }
-                        },
-                        onHeartbeatIntervalChange = { interval ->
-                            heartbeatInterval = interval
-                            prefs.edit().putString("heartbeat_interval", interval).apply()
-                            if (isRunning) {
-                                startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, interval)
-                            }
-                        },
+                        onHeartbeatDomainChange = { pendingHeartbeatDomain = it },
+                        onHeartbeatIntervalChange = { pendingHeartbeatInterval = it },
                         onAboutClick = { showAboutDialog = true },
                         onClose = { scope.launch { drawerState.close() } }
                     )
@@ -258,10 +281,24 @@ class MainActivity : ComponentActivity() {
                                     resolverUrl = profiles[index].url
                                     bootstrapDns = profiles[index].bootstrap
                                 }
+                                prefs.edit()
+                                    .putInt("selected_profile", index)
+                                    .putString("resolver_url", resolverUrl)
+                                    .putString("bootstrap_dns", bootstrapDns)
+                                    .apply()
                             },
-                            onUrlChange = { resolverUrl = it },
-                            onBootstrapChange = { bootstrapDns = it },
-                            onPortChange = { listenPort = it },
+                            onUrlChange = { 
+                                resolverUrl = it 
+                                prefs.edit().putString("resolver_url", it).apply()
+                            },
+                            onBootstrapChange = { 
+                                bootstrapDns = it 
+                                prefs.edit().putString("bootstrap_dns", it).apply()
+                            },
+                            onPortChange = { 
+                                listenPort = it 
+                                prefs.edit().putString("listen_port", it).apply()
+                            },
                             onToggle = onToggle
                         )
                     } else {

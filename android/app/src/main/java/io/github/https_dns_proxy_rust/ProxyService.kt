@@ -69,14 +69,33 @@ class ProxyService : VpnService() {
             return START_NOT_STICKY
         }
 
-        val listenPort = intent?.getIntExtra("listenPort", 5053) ?: 5053
-        val resolverUrl = intent?.getStringExtra("resolverUrl") ?: "https://cloudflare-dns.com/dns-query"
-        val bootstrapDns = intent?.getStringExtra("bootstrapDns") ?: "1.1.1.1"
-        val heartbeatEnabled = intent?.getBooleanExtra("heartbeatEnabled", true) ?: true
-        val heartbeatDomain = intent?.getStringExtra("heartbeatDomain") ?: "google.com"
-        val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", 10L) ?: 10L
+        // Start foreground immediately to prevent ANR/Crash
+        isProxyRunning = true
+        startForegroundServiceNotification()
 
-        if (isProxyRunning) {
+        val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val listenPort = intent?.getIntExtra("listenPort", -1).takeIf { it != null && it != -1 }
+            ?: prefs.getString("listen_port", "5053")?.toIntOrNull() ?: 5053
+        
+        val resolverUrl = intent?.getStringExtra("resolverUrl") 
+            ?: prefs.getString("resolver_url", "https://cloudflare-dns.com/dns-query") ?: "https://cloudflare-dns.com/dns-query"
+        
+        val bootstrapDns = intent?.getStringExtra("bootstrapDns")
+            ?: prefs.getString("bootstrap_dns", "1.1.1.1") ?: "1.1.1.1"
+        
+        val heartbeatEnabled = if (intent?.hasExtra("heartbeatEnabled") == true) {
+            intent.getBooleanExtra("heartbeatEnabled", true)
+        } else {
+            prefs.getBoolean("heartbeat_enabled", true)
+        }
+        
+        val heartbeatDomain = intent?.getStringExtra("heartbeatDomain")
+            ?: prefs.getString("heartbeat_domain", "google.com") ?: "google.com"
+            
+        val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", -1L).takeIf { it != null && it != -1L }
+            ?: prefs.getString("heartbeat_interval", "10")?.toLongOrNull() ?: 10L
+
+        if (vpnInterface != null) {
             // Already running, just refresh heartbeat if domain changed or toggle changed
             if (heartbeatEnabled) {
                 startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
@@ -86,9 +105,6 @@ class ProxyService : VpnService() {
             return START_STICKY
         }
         
-        isProxyRunning = true
-        startForegroundServiceNotification()
-
         thread {
             Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
             startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns)
@@ -98,8 +114,8 @@ class ProxyService : VpnService() {
             vpnInterface = Builder()
                 .setSession("SafeDNS")
                 .addAddress("10.0.0.1", 32)
-                .addDnsServer("1.1.1.1") 
-                .addRoute("1.1.1.1", 32) 
+                .addDnsServer("10.0.0.2") // Virtual DNS IP
+                .addRoute("10.0.0.2", 32) // Route only the virtual DNS IP
                 .setBlocking(true)
                 .apply {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -173,6 +189,7 @@ class ProxyService : VpnService() {
                         val ihl = (data[0].toInt() and 0x0F) * 4
                         val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
                         if (dPort == 53) {
+                            Log.d(TAG, "Captured DNS packet, forwarding to proxy")
                             val dnsPayload = data.copyOfRange(ihl + 8, length)
                             udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                             val recvBuf = ByteArray(4096)
@@ -181,7 +198,10 @@ class ProxyService : VpnService() {
                             try {
                                 udpSocket.receive(recvPacket)
                                 outputStream.write(constructIpv4Udp(data, recvPacket.data, recvPacket.length))
-                            } catch (e: Exception) {}
+                                Log.d(TAG, "Received DNS response from proxy and wrote to VPN")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Proxy timeout or error waiting for response", e)
+                            }
                         }
                     }
                     packet.clear()
