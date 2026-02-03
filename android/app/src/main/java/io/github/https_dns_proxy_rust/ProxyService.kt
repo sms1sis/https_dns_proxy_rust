@@ -88,11 +88,8 @@ class ProxyService : VpnService() {
         val bootstrapDns = intent?.getStringExtra("bootstrapDns")
             ?: prefs.getString("bootstrap_dns", "1.1.1.1") ?: "1.1.1.1"
         
-        val heartbeatEnabled = if (intent?.hasExtra("heartbeatEnabled") == true) {
-            intent.getBooleanExtra("heartbeatEnabled", true)
-        } else {
-            prefs.getBoolean("heartbeat_enabled", true)
-        }
+        val heartbeatEnabled = intent?.getBooleanExtra("heartbeatEnabled", prefs.getBoolean("heartbeat_enabled", true)) 
+            ?: prefs.getBoolean("heartbeat_enabled", true)
         
         val heartbeatDomain = intent?.getStringExtra("heartbeatDomain")
             ?: prefs.getString("heartbeat_domain", "google.com") ?: "google.com"
@@ -100,43 +97,37 @@ class ProxyService : VpnService() {
         val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", -1L).takeIf { it != null && it != -1L }
             ?: prefs.getString("heartbeat_interval", "10")?.toLongOrNull() ?: 10L
 
+        Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl, heartbeat=$heartbeatEnabled")
+
         if (vpnInterface != null) {
-            // Already running, check for config changes
-            if (runningPort != listenPort || runningUrl != resolverUrl || runningBootstrap != bootstrapDns) {
-                Log.d(TAG, "Configuration changed, restarting proxy backend...")
-                stopProxy() // Stop the native proxy thread
+            val configChanged = runningPort != listenPort || runningUrl != resolverUrl || runningBootstrap != bootstrapDns
+            
+            if (configChanged) {
+                Log.d(TAG, "Dynamic config change detected. Restarting backend...")
+                stopProxy()
                 
-                // Update active config
                 runningPort = listenPort
                 runningUrl = resolverUrl
                 runningBootstrap = bootstrapDns
                 
-                // Restart native proxy
                 thread {
-                    try { Thread.sleep(500) } catch (e: InterruptedException) {} // Give time for port release
-                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort with URL: $resolverUrl")
+                    try { Thread.sleep(500) } catch (e: InterruptedException) {}
+                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
                     val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns)
                     Log.d(TAG, "Backend proxy initialized (result: $res)")
-                    // The actual binding happens in a spawned task, so we wait a tiny bit more
-                    try { Thread.sleep(100) } catch (e: InterruptedException) {}
+                    
+                    if (heartbeatEnabled) {
+                        Log.d(TAG, "Triggering post-restart heartbeat")
+                        startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
+                    }
                 }
-                
-                // Note: forwardPackets loop is still running. If listenPort changed, it might be sending to old port.
-                // ideally we should restart forwardPackets too if port changed, but for now we assume port changes are rare/handled.
-                // Since forwardPackets reads 'runningPort' effectively via the restart if we passed it? 
-                // Wait, forwardPackets(listenPort) was called with local var. It keeps using old port.
-                // To fix port change, we would need to stop forwardPackets loop.
-                // However, user mostly changes URL. Port change is advanced.
-                // We'll leave port change limitation for now or handle it if critical.
-                // Actually, let's just assume port doesn't change frequently or requires restart. 
-                // But URL change is the main request.
-            }
-
-            // Refresh heartbeat settings
-            if (heartbeatEnabled) {
-                startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
             } else {
-                stopHeartbeat()
+                Log.d(TAG, "No config change, refreshing heartbeat only")
+                if (heartbeatEnabled) {
+                    startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
+                } else {
+                    stopHeartbeat()
+                }
             }
             return START_STICKY
         }
@@ -188,12 +179,12 @@ class ProxyService : VpnService() {
             val socket = DatagramSocket()
             val address = InetAddress.getByName("127.0.0.1")
             val query = constructDnsQuery(domain)
-            Log.d(TAG, "Starting heartbeat for $domain on port $port every ${interval}s")
+            Log.d(TAG, "Starting heartbeat loop for $domain on port $port")
             try {
                 while (isProxyRunning && currentHeartbeatDomain == domain && !Thread.currentThread().isInterrupted) {
                     val packet = DatagramPacket(query, query.size, address, port)
                     socket.send(packet)
-                    // Log.d(TAG, "Sent heartbeat ping") 
+                    Log.d(TAG, "Sent heartbeat ping to localhost:$port") 
                     try {
                         Thread.sleep(interval * 1000)
                     } catch (e: InterruptedException) {
@@ -204,6 +195,7 @@ class ProxyService : VpnService() {
                 Log.e(TAG, "Heartbeat error", e)
             } finally {
                 socket.close()
+                Log.d(TAG, "Heartbeat loop stopped")
             }
         }
     }

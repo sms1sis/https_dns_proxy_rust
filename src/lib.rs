@@ -3,7 +3,7 @@ use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url, Proxy};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{info, error, debug};
 use trust_dns_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, Protocol};
@@ -13,18 +13,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fs::File;
 use std::io::Read;
 use std::collections::VecDeque;
-use std::sync::Mutex;
 
 pub struct Stats {
     pub queries_udp: AtomicUsize,
     pub queries_tcp: AtomicUsize,
     pub errors: AtomicUsize,
-    pub last_latency_ms: AtomicUsize,
 }
 
 lazy_static::lazy_static! {
     static ref QUERY_LOGS: Mutex<VecDeque<String>> = Mutex::new(VecDeque::with_capacity(50));
-    static ref GLOBAL_STATS: Arc<RwLock<Option<Arc<Stats>>>> = Arc::new(RwLock::new(None));
+    static ref GLOBAL_STATS: RwLock<Option<Arc<Stats>>> = RwLock::new(None);
+    static ref LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
 }
 
 fn add_query_log(domain: &str, status: &str) {
@@ -42,7 +41,6 @@ impl Stats {
             queries_udp: AtomicUsize::new(0),
             queries_tcp: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
-            last_latency_ms: AtomicUsize::new(0),
         }
     }
 }
@@ -281,11 +279,11 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) -> jint {
-        let stats = RUNTIME.block_on(async {
-            let r = GLOBAL_STATS.read().await;
-            r.as_ref().map(|s| s.last_latency_ms.load(Ordering::Relaxed))
-        });
-        stats.unwrap_or(0) as jint
+        let lat = LAST_LATENCY.load(Ordering::Relaxed) as jint;
+        if lat > 0 {
+            debug!("JNI getLatency: {}ms", lat);
+        }
+        lat
     }
 
     #[no_mangle]
@@ -317,7 +315,7 @@ pub mod jni_api {
         if let Some(token) = lock.take() {
             token.cancel();
         }
-        // Keep GLOBAL_STATS so getLatency returns last known value during restart
+        // Keep GLOBAL_STATS for transition
     }
 }
 
@@ -468,7 +466,7 @@ async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Vec<u8>
             }
             let bytes = r.bytes().await?.to_vec();
             let latency = start.elapsed().as_millis() as usize;
-            stats.last_latency_ms.store(latency, Ordering::Relaxed);
+            LAST_LATENCY.store(latency, Ordering::Relaxed);
             add_query_log(&domain, &format!("OK ({}ms)", latency));
             Ok(bytes)
         }
