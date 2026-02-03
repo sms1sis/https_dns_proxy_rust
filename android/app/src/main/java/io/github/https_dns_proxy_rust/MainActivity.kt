@@ -108,10 +108,17 @@ class MainActivity : ComponentActivity() {
         )
         
         var selectedProfileIndex by remember { mutableStateOf(prefs.getInt("selected_profile", 0)) }
+
+        // Active settings (Source of truth for Service/Prefs)
         var resolverUrl by remember { mutableStateOf(prefs.getString("resolver_url", profiles[selectedProfileIndex].url) ?: profiles[selectedProfileIndex].url) }
         var bootstrapDns by remember { mutableStateOf(prefs.getString("bootstrap_dns", profiles[selectedProfileIndex].bootstrap) ?: profiles[selectedProfileIndex].bootstrap) }
         var listenPort by remember { mutableStateOf(prefs.getString("listen_port", "5053") ?: "5053") }
 
+        // UI State (Pending user input)
+        var pendingResolverUrl by remember { mutableStateOf(resolverUrl) }
+        var pendingBootstrapDns by remember { mutableStateOf(bootstrapDns) }
+        var pendingListenPort by remember { mutableStateOf(listenPort) }
+        
         val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
         val scope = rememberCoroutineScope()
         var showAboutDialog by remember { mutableStateOf(false) }
@@ -135,27 +142,40 @@ class MainActivity : ComponentActivity() {
             while (true) {
                 isRunning = ProxyService.isProxyRunning
                 if (isRunning) {
-                    latency = ProxyService.getLatency()
+                    val newLat = ProxyService.getLatency()
+                    if (newLat > 0 && newLat != latency) {
+                        Log.d("SafeDNS", "UI Latency update: $newLat ms")
+                        latency = newLat
+                    }
                     logs = ProxyService.getLogs()
                 }
                 delay(1000)
             }
         }
 
-        // Debounce effect for heartbeat settings
-        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval) {
-            if (pendingHeartbeatDomain == heartbeatDomain && pendingHeartbeatInterval == heartbeatInterval) return@LaunchedEffect
-            
+        // Debounce effect for all settings
+        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort) {
             delay(1500) // Wait for 1.5s after user stops typing
             
-            heartbeatDomain = pendingHeartbeatDomain
-            heartbeatInterval = pendingHeartbeatInterval
-            
-            prefs.edit().putString("heartbeat_domain", heartbeatDomain).apply()
-            prefs.edit().putString("heartbeat_interval", heartbeatInterval).apply()
-            
-            if (isRunning) {
-                startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+            var changed = false
+            if (heartbeatDomain != pendingHeartbeatDomain) { heartbeatDomain = pendingHeartbeatDomain; changed = true }
+            if (heartbeatInterval != pendingHeartbeatInterval) { heartbeatInterval = pendingHeartbeatInterval; changed = true }
+            if (resolverUrl != pendingResolverUrl) { resolverUrl = pendingResolverUrl; changed = true }
+            if (bootstrapDns != pendingBootstrapDns) { bootstrapDns = pendingBootstrapDns; changed = true }
+            if (listenPort != pendingListenPort) { listenPort = pendingListenPort; changed = true }
+
+            if (changed) {
+                prefs.edit()
+                    .putString("heartbeat_domain", heartbeatDomain)
+                    .putString("heartbeat_interval", heartbeatInterval)
+                    .putString("resolver_url", resolverUrl)
+                    .putString("bootstrap_dns", bootstrapDns)
+                    .putString("listen_port", listenPort)
+                    .apply()
+                
+                if (isRunning) {
+                    startProxyService(resolverUrl, listenPort, bootstrapDns, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                }
             }
         }
 
@@ -270,35 +290,25 @@ class MainActivity : ComponentActivity() {
                         DashboardScreen(
                             isRunning = isRunning,
                             latency = latency,
-                            resolverUrl = resolverUrl,
-                            bootstrapDns = bootstrapDns,
-                            listenPort = listenPort,
+                            resolverUrl = pendingResolverUrl,
+                            bootstrapDns = pendingBootstrapDns,
+                            listenPort = pendingListenPort,
                             profiles = profiles,
                             selectedProfileIndex = selectedProfileIndex,
                             onProfileSelect = { index ->
                                 selectedProfileIndex = index
                                 if (index < profiles.size - 1) {
-                                    resolverUrl = profiles[index].url
-                                    bootstrapDns = profiles[index].bootstrap
+                                    pendingResolverUrl = profiles[index].url
+                                    pendingBootstrapDns = profiles[index].bootstrap
+                                    // Trigger immediate update for profile click (no debounce needed ideally, but debounce handles it)
+                                } else {
+                                    // If Custom selected, keep current pending values
                                 }
-                                prefs.edit()
-                                    .putInt("selected_profile", index)
-                                    .putString("resolver_url", resolverUrl)
-                                    .putString("bootstrap_dns", bootstrapDns)
-                                    .apply()
+                                // We rely on the LaunchedEffect to save and update service
                             },
-                            onUrlChange = { 
-                                resolverUrl = it 
-                                prefs.edit().putString("resolver_url", it).apply()
-                            },
-                            onBootstrapChange = { 
-                                bootstrapDns = it 
-                                prefs.edit().putString("bootstrap_dns", it).apply()
-                            },
-                            onPortChange = { 
-                                listenPort = it 
-                                prefs.edit().putString("listen_port", it).apply()
-                            },
+                            onUrlChange = { pendingResolverUrl = it },
+                            onBootstrapChange = { pendingBootstrapDns = it },
+                            onPortChange = { pendingListenPort = it },
                             onToggle = onToggle
                         )
                     } else {

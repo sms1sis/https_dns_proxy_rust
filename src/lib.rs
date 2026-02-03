@@ -251,12 +251,16 @@ pub mod jni_api {
             *lock = Some(token);
         }
 
+        let stats = Arc::new(Stats::new());
+        RUNTIME.block_on(async {
+            let mut w = GLOBAL_STATS.write().await;
+            *w = Some(stats.clone());
+        });
+
+        let config_clone = config.clone();
+        let stats_clone = stats.clone();
+        
         RUNTIME.spawn(async move {
-            let stats = Arc::new(Stats::new());
-            {
-                let mut w = GLOBAL_STATS.write().await;
-                *w = Some(stats.clone());
-            }
             let (tx, rx) = tokio::sync::oneshot::channel();
             
             tokio::spawn(async move {
@@ -264,7 +268,7 @@ pub mod jni_api {
                 let _ = tx.send(());
             });
 
-            if let Err(e) = run_proxy(config, stats, rx).await {
+            if let Err(e) = run_proxy(config_clone, stats_clone, rx).await {
                 error!("Proxy error: {}", e);
             }
         });
@@ -313,10 +317,7 @@ pub mod jni_api {
         if let Some(token) = lock.take() {
             token.cancel();
         }
-        RUNTIME.block_on(async {
-            let mut w = GLOBAL_STATS.write().await;
-            *w = None;
-        });
+        // Keep GLOBAL_STATS so getLatency returns last known value during restart
     }
 }
 
