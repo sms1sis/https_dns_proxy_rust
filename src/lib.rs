@@ -268,9 +268,15 @@ pub mod jni_api {
         #[cfg(target_os = "android")]
         {
             use log::LevelFilter;
+            let level = if cfg!(debug_assertions) {
+                LevelFilter::Debug
+            } else {
+                LevelFilter::Info
+            };
+
             android_logger::init_once(
                 android_logger::Config::default()
-                    .with_max_level(LevelFilter::Debug)
+                    .with_max_level(level)
                     .with_tag("https_dns_proxy"),
             );
 

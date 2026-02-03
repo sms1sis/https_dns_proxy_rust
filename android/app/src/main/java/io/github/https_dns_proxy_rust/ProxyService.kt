@@ -256,7 +256,6 @@ class ProxyService : VpnService() {
                              // Log.d(TAG, "IPv4 UDP packet: dPort=$dPort")
                         }
                         if (dPort == 53) {
-                            Log.d(TAG, "Captured IPv4 DNS packet")
                             val dnsPayload = data.copyOfRange(ihl + 8, length)
                             udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                             val recvBuf = ByteArray(4096)
@@ -274,9 +273,7 @@ class ProxyService : VpnService() {
                         // Log.d(TAG, "IPv6 packet seen: nextHeader=$nextHeader")
                         if (nextHeader == 17) { // UDP
                             val dPort = ((data[42].toInt() and 0xFF) shl 8) or (data[43].toInt() and 0xFF)
-                            Log.d(TAG, "IPv6 UDP packet: dPort=$dPort")
                             if (dPort == 53) {
-                                Log.d(TAG, "Captured IPv6 DNS packet")
                                 val dnsPayload = data.copyOfRange(48, length)
                                 udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                                 val recvBuf = ByteArray(4096)
@@ -284,7 +281,6 @@ class ProxyService : VpnService() {
                                 udpSocket.soTimeout = 4000
                                                             try {
                                                                 udpSocket.receive(recvPacket)
-                                                                Log.d(TAG, "Received IPv6 response from Rust: len=${recvPacket.length}")
                                                                 outputStream.write(constructIpv6Udp(data, recvPacket.data, recvPacket.length))
                                                             } catch (e: Exception) {
                                                                 Log.e(TAG, "Proxy timeout (IPv6)", e)
