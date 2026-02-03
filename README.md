@@ -2,7 +2,7 @@
 
 A lightweight, asynchronous DNS-to-HTTPS (DoH) proxy written in Rust.
 
-This project is a Rust implementation of the [original C-based https-dns-proxy](https://github.com/stangri/https-dns-proxy) by [stangri](https://github.com/stangri).
+This project is a Rust implementation of the [original C-based https-dns-proxy](https://github.com/aarond10/https_dns_proxy) by [aarond10](https://github.com/aarond10).
 
 ## Features
 
