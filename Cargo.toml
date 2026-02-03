@@ -2,6 +2,12 @@
 name = "https_dns_proxy_rust"
 version = "0.1.0"
 edition = "2021"
+authors = ["sms1sis <sadimsajid2004@gmail.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/sms1sis/https_dns_proxy_rust"
+categories = ["network-programming", "asynchronous", "cryptography"]
+description = "A lightweight DNS-over-HTTPS (DoH) proxy for secure DNS lookups."
+keywords = ["dns", "doh", "proxy", "security", "privacy"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
