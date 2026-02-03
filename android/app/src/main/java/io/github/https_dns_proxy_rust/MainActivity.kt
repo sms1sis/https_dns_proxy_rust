@@ -30,12 +30,16 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -705,13 +709,83 @@ class MainActivity : ComponentActivity() {
                         .scale(scale)
                         .shadow(if (isRunning) 12.dp else 0.dp, CircleShape)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
+                    val innerTransition = rememberInfiniteTransition()
+                    val scanPos by innerTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(3000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Restart
+                        )
+                    )
+                    val lockAlpha by innerTransition.animateFloat(
+                        initialValue = 0.4f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(1500, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        )
+                    )
+
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.drawWithContent {
+                            drawContent()
+                            if (isRunning) {
+                                val y = size.height * scanPos
+                                drawLine(
+                                    brush = Brush.verticalGradient(
+                                        colors = listOf(Color.Transparent, color.copy(alpha = 0.5f), Color.Transparent),
+                                        startY = y - 20,
+                                        endY = y + 20
+                                    ),
+                                    start = Offset(0f, y),
+                                    end = Offset(size.width, y),
+                                    strokeWidth = 2.dp.toPx()
+                                )
+                            }
+                        }
+                    ) {
+                        // Background Shield
                         Icon(
                             imageVector = Icons.Default.Shield,
                             contentDescription = null,
-                            modifier = Modifier.size(72.dp),
+                            modifier = Modifier.size(82.dp).alpha(if (isRunning) 1f else 0.3f),
                             tint = if (isRunning) MaterialTheme.colorScheme.onPrimaryContainer else color
                         )
+                        
+                        if (isRunning) {
+                            // Pulsing Lock Icon
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(32.dp).graphicsLayer(alpha = lockAlpha),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            
+                            // Orbital Dot
+                            val orbitRotation by innerTransition.animateFloat(
+                                initialValue = 0f,
+                                targetValue = 360f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(2500, easing = LinearEasing),
+                                    repeatMode = RepeatMode.Restart
+                                )
+                            )
+                            Box(
+                                Modifier
+                                    .size(60.dp)
+                                    .rotate(orbitRotation)
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(6.dp)
+                                        .align(Alignment.TopCenter)
+                                        .background(color, CircleShape)
+                                        .shadow(4.dp, CircleShape)
+                                )
+                            }
+                        }
                     }
                 }
             }
