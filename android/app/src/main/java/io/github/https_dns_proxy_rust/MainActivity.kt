@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -64,6 +65,7 @@ class MainActivity : ComponentActivity() {
             val context = LocalContext.current
             val prefs = remember { context.getSharedPreferences("settings", MODE_PRIVATE) }
             var themeMode by remember { mutableStateOf(prefs.getString("theme", "System") ?: "System") }
+            var notchMode by remember { mutableStateOf(prefs.getBoolean("notch_mode", true)) }
             
             val darkTheme = when (themeMode) {
                 "Light" -> false
@@ -73,6 +75,19 @@ class MainActivity : ComponentActivity() {
             }
             
             val amoled = themeMode == "AMOLED"
+
+            LaunchedEffect(notchMode) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val window = (context as android.app.Activity).window
+                    val params = window.attributes
+                    params.layoutInDisplayCutoutMode = if (notchMode) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    } else {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                    }
+                    window.attributes = params
+                }
+            }
 
             DisposableEffect(darkTheme) {
                 enableEdgeToEdge(
@@ -98,6 +113,11 @@ class MainActivity : ComponentActivity() {
                         onThemeChange = { 
                             themeMode = it
                             prefs.edit().putString("theme", it).apply()
+                        },
+                        notchMode = notchMode,
+                        onNotchModeChange = {
+                            notchMode = it
+                            prefs.edit().putBoolean("notch_mode", it).apply()
                         }
                     )
                 }
@@ -107,7 +127,7 @@ class MainActivity : ComponentActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun ProxyScreen(themeMode: String, onThemeChange: (String) -> Unit) {
+    fun ProxyScreen(themeMode: String, onThemeChange: (String) -> Unit, notchMode: Boolean, onNotchModeChange: (Boolean) -> Unit) {
         val context = LocalContext.current
         val prefs = remember { context.getSharedPreferences("settings", MODE_PRIVATE) }
         
@@ -285,6 +305,8 @@ class MainActivity : ComponentActivity() {
                         heartbeatDomain = pendingHeartbeatDomain,
                         heartbeatInterval = pendingHeartbeatInterval,
                         onThemeChange = onThemeChange,
+                        notchMode = notchMode,
+                        onNotchModeChange = onNotchModeChange,
                         onAutoStartChange = { 
                             autoStart = it
                             prefs.edit().putBoolean("auto_start", it).apply()
@@ -415,10 +437,14 @@ class MainActivity : ComponentActivity() {
 
             // Main Settings Card
             ElevatedCard(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().border(
+                    width = 1.dp, 
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f), 
+                    shape = RoundedCornerShape(32.dp)
+                ),
                 shape = RoundedCornerShape(32.dp),
                 colors = CardDefaults.elevatedCardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow
                 ),
                 elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
             ) {
@@ -596,6 +622,8 @@ class MainActivity : ComponentActivity() {
         heartbeatDomain: String,
         heartbeatInterval: String,
         onThemeChange: (String) -> Unit,
+        notchMode: Boolean,
+        onNotchModeChange: (Boolean) -> Unit,
         onAutoStartChange: (Boolean) -> Unit,
         onHeartbeatChange: (Boolean) -> Unit,
         onHeartbeatDomainChange: (String) -> Unit,
@@ -618,6 +646,15 @@ class MainActivity : ComponentActivity() {
                     onClick = { onThemeChange(mode) },
                     shape = RoundedCornerShape(16.dp)
                 )
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Notch Support", fontWeight = FontWeight.Bold)
+                    Text("Edge-to-edge display", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = notchMode, onCheckedChange = onNotchModeChange)
             }
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
@@ -703,10 +740,10 @@ class MainActivity : ComponentActivity() {
         val haptic = LocalHapticFeedback.current
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(contentAlignment = Alignment.Center) {
-                val color = if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                val color = if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
                 
-                // Outer static ring
-                Box(Modifier.size(240.dp).clip(CircleShape).background(color.copy(alpha = 0.03f)))
+                // Outer static ring - made more visible when inactive
+                Box(Modifier.size(240.dp).clip(CircleShape).background(color.copy(alpha = if (isRunning) 0.03f else 0.1f)))
                 
                 // Animated pulse and rotating ring
                 if (isRunning) {
@@ -773,11 +810,13 @@ class MainActivity : ComponentActivity() {
                         onToggle()
                     },
                     shape = CircleShape,
-                    color = if (isRunning) MaterialTheme.colorScheme.primaryContainer else color.copy(alpha = 0.1f),
+                    // Made inactive surface more visible
+                    color = if (isRunning) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
                     modifier = Modifier
                         .size(140.dp)
                         .scale(scale)
                         .shadow(if (isRunning) 12.dp else 0.dp, CircleShape)
+                        .border(if (isRunning) 0.dp else 2.dp, color.copy(alpha = 0.5f), CircleShape) // Add border when inactive
                 ) {
                     val innerTransition = rememberInfiniteTransition()
                     val scanPos by innerTransition.animateFloat(
@@ -816,11 +855,11 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     ) {
-                        // Background Shield
+                        // Background Shield - increased alpha for inactive state
                         Icon(
                             imageVector = Icons.Default.Shield,
                             contentDescription = null,
-                            modifier = Modifier.size(82.dp).alpha(if (isRunning) 1f else 0.3f),
+                            modifier = Modifier.size(82.dp).alpha(if (isRunning) 1f else 0.5f),
                             tint = if (isRunning) MaterialTheme.colorScheme.onPrimaryContainer else color
                         )
                         
