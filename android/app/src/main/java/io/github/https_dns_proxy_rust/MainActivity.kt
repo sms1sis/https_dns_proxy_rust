@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -47,7 +48,6 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
             val context = LocalContext.current
@@ -62,6 +62,20 @@ class MainActivity : ComponentActivity() {
             }
             
             val amoled = themeMode == "AMOLED"
+
+            DisposableEffect(darkTheme) {
+                enableEdgeToEdge(
+                    statusBarStyle = androidx.activity.SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT,
+                    ) { darkTheme },
+                    navigationBarStyle = androidx.activity.SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT,
+                    ) { darkTheme }
+                )
+                onDispose {}
+            }
 
             HttpsDnsProxyTheme(darkTheme = darkTheme, amoled = amoled) {
                 Surface(
@@ -171,6 +185,7 @@ class MainActivity : ComponentActivity() {
                     .putString("resolver_url", resolverUrl)
                     .putString("bootstrap_dns", bootstrapDns)
                     .putString("listen_port", listenPort)
+                    .putInt("selected_profile", selectedProfileIndex)
                     .apply()
                 
                 if (isRunning) {
