@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -30,12 +31,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -622,46 +626,84 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun StatusHero(isRunning: Boolean, latency: Int, onToggle: () -> Unit) {
+        val haptic = LocalHapticFeedback.current
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(contentAlignment = Alignment.Center) {
                 val color = if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                 
                 // Outer static ring
-                Box(Modifier.size(220.dp).clip(CircleShape).background(color.copy(alpha = 0.05f)))
+                Box(Modifier.size(240.dp).clip(CircleShape).background(color.copy(alpha = 0.03f)))
                 
-                // Animated pulse
+                // Animated pulse and rotating ring
                 if (isRunning) {
                     val infiniteTransition = rememberInfiniteTransition()
-                    val pulseAlpha by infiniteTransition.animateFloat(
-                        initialValue = 0.1f,
-                        targetValue = 0.3f,
+                    val rotation by infiniteTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 360f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(2000, easing = LinearEasing),
-                            repeatMode = RepeatMode.Reverse
+                            animation = tween(4000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Restart
                         )
                     )
-                    val pulseScale by infiniteTransition.animateFloat(
+                    val pulseScale1 by infiniteTransition.animateFloat(
                         initialValue = 1f,
-                        targetValue = 1.2f,
+                        targetValue = 1.4f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(1500, easing = FastOutSlowInEasing),
+                            animation = tween(2000, easing = FastOutSlowInEasing),
                             repeatMode = RepeatMode.Reverse
                         )
                     )
+                    val pulseAlpha1 by infiniteTransition.animateFloat(
+                        initialValue = 0.1f,
+                        targetValue = 0.05f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(2000, easing = FastOutSlowInEasing),
+                            repeatMode = RepeatMode.Reverse
+                        )
+                    )
+
+                    // Rotating Glow Ring
+                    Box(
+                        Modifier
+                            .size(190.dp)
+                            .rotate(rotation)
+                            .border(
+                                width = 3.dp,
+                                brush = Brush.sweepGradient(
+                                    colors = listOf(Color.Transparent, color, Color.Transparent)
+                                ),
+                                shape = CircleShape
+                            )
+                    )
+
+                    // Organic Pulse 1
                     Box(
                         Modifier
                             .size(160.dp)
-                            .scale(pulseScale)
+                            .scale(pulseScale1)
                             .clip(CircleShape)
-                            .background(color.copy(alpha = pulseAlpha))
+                            .background(color.copy(alpha = pulseAlpha1))
                     )
                 }
 
+                var isPressed by remember { mutableStateOf(false) }
+                val scale by animateFloatAsState(
+                    targetValue = if (isPressed) 0.92f else 1f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+                    label = "clickScale"
+                )
+
                 Surface(
-                    onClick = onToggle,
+                    onClick = { 
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onToggle()
+                    },
                     shape = CircleShape,
                     color = if (isRunning) MaterialTheme.colorScheme.primaryContainer else color.copy(alpha = 0.1f),
-                    modifier = Modifier.size(140.dp).shadow(if (isRunning) 8.dp else 0.dp, CircleShape)
+                    modifier = Modifier
+                        .size(140.dp)
+                        .scale(scale)
+                        .shadow(if (isRunning) 12.dp else 0.dp, CircleShape)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
