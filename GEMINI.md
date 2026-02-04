@@ -9,7 +9,7 @@
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 *   **Package Name:** `io.github.SafeDNS`
 
-## Recent Android Updates (v0.3.1)
+## Recent Android Updates (v0.3.2)
 
 *   **Rebranding:** Fully rebranded as **SafeDNS** with a new package identity and polished UI.
 *   **Persistent HTTP Connections:** Implemented a `DynamicResolver` to maintain a single `reqwest::Client` with a shared connection pool, eliminating latency spikes during bootstrap refreshes.
