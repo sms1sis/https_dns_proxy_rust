@@ -19,6 +19,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -53,6 +55,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.addOutline
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.geometry.center
+import android.graphics.Matrix
+import android.graphics.SweepGradient
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
 import io.github.SafeDNS.ui.theme.SafeDNSTheme
 import kotlinx.coroutines.delay
@@ -347,6 +357,7 @@ class MainActivity : ComponentActivity() {
             Scaffold(
                 topBar = {
                     CenterAlignedTopAppBar(
+                        modifier = Modifier.clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
                         title = { 
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.Shield, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
@@ -355,34 +366,86 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         navigationIcon = {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Filled.Menu, "Menu")
+                            Surface(
+                                onClick = { scope.launch { drawerState.open() } },
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                                modifier = Modifier.padding(start = 12.dp).size(40.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Filled.Menu, "Menu", modifier = Modifier.size(24.dp))
+                                }
+                            }
+                        },
+                        actions = {
+                            if (isRunning) {
+                                Surface(
+                                    color = (if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107)).copy(alpha = 0.15f),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.padding(end = 12.dp).height(40.dp),
+                                    border = BorderStroke(1.dp, (if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107)).copy(alpha = 0.3f))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(Modifier.size(8.dp).background(if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107), CircleShape))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("${latency}ms", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            } else {
+                                Spacer(Modifier.width(52.dp))
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
                     )
                 },
                 bottomBar = {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                        tonalElevation = 0.dp
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
+                        tonalElevation = 0.dp // Added tonalElevation as it was present in original NavigationBar
                     ) {
-                        NavigationBarItem(
-                            icon = { Icon(Icons.Filled.Dashboard, null) },
-                            label = { Text("App") },
-                            selected = currentTab == 0,
-                            onClick = { currentTab = 0 }
-                        )
-                        NavigationBarItem(
-                            icon = { Icon(Icons.AutoMirrored.Filled.ListAlt, null) },
-                            label = { Text("Activity") },
-                            selected = currentTab == 1,
-                            onClick = { currentTab = 1 }
-                        )
+                        Row(
+                            modifier = Modifier
+                                .windowInsetsPadding(WindowInsets.navigationBars)
+                                .height(64.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            listOf(
+                                Icons.Filled.Dashboard to "App",
+                                Icons.AutoMirrored.Filled.ListAlt to "Activity"
+                            ).forEachIndexed { index, pair ->
+                                val selected = currentTab == index
+                                val color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                val bgColor = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else Color.Transparent
+                                
+                                Column(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable { currentTab = index }
+                                        .background(bgColor)
+                                        .padding(horizontal = 24.dp, vertical = 8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(pair.first, null, tint = color, modifier = Modifier.size(24.dp))
+                                }
+                            }
+                        }
                     }
                 }
             ) { contentPadding ->
-                Box(modifier = Modifier.padding(contentPadding).fillMaxSize()) {
+                Box(modifier = Modifier
+                    .padding(contentPadding)
+                    .consumeWindowInsets(contentPadding)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                    .fillMaxSize()) {
                     if (isRunning) {
                         Box(Modifier.fillMaxSize().background(
                             Brush.radialGradient(
@@ -442,110 +505,152 @@ class MainActivity : ComponentActivity() {
         onPortChange: (String) -> Unit,
         onToggle: () -> Unit
     ) {
+        val infiniteTransition = rememberInfiniteTransition(label = "cardNeon")
+        val rotation by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(6000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "rotation"
+        )
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp),
+                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .padding(horizontal = 24.dp, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceEvenly
+            verticalArrangement = Arrangement.spacedBy(32.dp, Alignment.CenterVertically)
         ) {
             StatusHero(isRunning, latency, onToggle)
 
             // Main Settings Card
+            val cardShape = RoundedCornerShape(32.dp)
+            val borderColor = MaterialTheme.colorScheme.primary
+            val inactiveColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+
             ElevatedCard(
-                modifier = Modifier.fillMaxWidth().border(
-                    width = 1.dp, 
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f), 
-                    shape = RoundedCornerShape(32.dp)
-                ),
-                shape = RoundedCornerShape(32.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .drawWithContent {
+                        drawContent()
+                        val outline = cardShape.createOutline(size, layoutDirection, this)
+                        val path = Path().apply { addOutline(outline) }
+                        
+                        val strokeWidth = 2.dp.toPx()
+                        
+                        // 1. Static "tube" background (Always visible)
+                        drawPath(
+                            path = path,
+                            color = borderColor.copy(alpha = 0.15f),
+                            style = Stroke(width = strokeWidth)
+                        )
+
+                        // 2. Rotating walking light segment (Always active)
+                        val shader = SweepGradient(
+                            size.center.x, size.center.y,
+                            intArrayOf(
+                                android.graphics.Color.TRANSPARENT,
+                                borderColor.toArgb(),
+                                android.graphics.Color.TRANSPARENT,
+                                android.graphics.Color.TRANSPARENT,
+                                borderColor.toArgb(),
+                                android.graphics.Color.TRANSPARENT,
+                                android.graphics.Color.TRANSPARENT
+                            ),
+                            floatArrayOf(0.0f, 0.1f, 0.2f, 0.5f, 0.6f, 0.7f, 1.0f)
+                        )
+                        val matrix = Matrix()
+                        matrix.postRotate(rotation, size.center.x, size.center.y)
+                        shader.setLocalMatrix(matrix)
+
+                        drawPath(
+                            path = path,
+                            brush = ShaderBrush(shader),
+                            style = Stroke(width = strokeWidth)
+                        )
+                    },
+                shape = cardShape,
                 colors = CardDefaults.elevatedCardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerLow
                 ),
                 elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
             ) {
                 Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = CircleShape,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Tune, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = CircleShape,
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.Tune, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text("Configuration", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                        
+                        var expanded by remember { mutableStateOf(false) }
+                        Column {
+                            Text("Service Provider", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.height(4.dp))
+                            OutlinedCard(
+                                onClick = { expanded = true },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(profiles[selectedProfileIndex].name, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                                    Icon(Icons.Default.KeyboardArrowDown, null)
+                                }
+                            }
+                            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                                profiles.forEachIndexed { index, profile ->
+                                    DropdownMenuItem(
+                                        text = { Text(profile.name) },
+                                        onClick = { onProfileSelect(index); expanded = false }
+                                    )
+                                }
                             }
                         }
-                        Spacer(Modifier.width(12.dp))
-                        Text("Configuration", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    }
-                    
-                    var expanded by remember { mutableStateOf(false) }
-                    Column {
-                        Text("Service Provider", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.height(4.dp))
-                        OutlinedCard(
-                            onClick = { expanded = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(16.dp)
-                        ) {
-                            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(profiles[selectedProfileIndex].name, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
-                                Icon(Icons.Default.KeyboardArrowDown, null)
-                            }
-                        }
-                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                            profiles.forEachIndexed { index, profile ->
-                                DropdownMenuItem(
-                                    text = { Text(profile.name) },
-                                    onClick = { onProfileSelect(index); expanded = false }
-                                )
-                            }
-                        }
-                    }
 
-                    OutlinedTextField(
-                        value = resolverUrl,
-                        onValueChange = onUrlChange,
-                        label = { Text("Resolver Endpoint") },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        singleLine = true,
-                        enabled = selectedProfileIndex == profiles.size - 1 || profiles[selectedProfileIndex].url.isEmpty()
-                    )
-                    
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedTextField(
-                            value = bootstrapDns,
-                            onValueChange = onBootstrapChange,
-                            label = { Text("Bootstrap") },
-                            modifier = Modifier.weight(1f),
+                            value = resolverUrl,
+                            onValueChange = onUrlChange,
+                            label = { Text("Resolver Endpoint") },
+                            modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
                             singleLine = true,
-                            enabled = selectedProfileIndex == profiles.size - 1
+                            enabled = selectedProfileIndex == profiles.size - 1 || profiles[selectedProfileIndex].url.isEmpty()
                         )
-                        OutlinedTextField(
-                            value = listenPort,
-                            onValueChange = onPortChange,
-                            label = { Text("Port") },
-                            modifier = Modifier.weight(0.7f),
-                            shape = RoundedCornerShape(16.dp),
-                            singleLine = true
-                        )
-                    }
-                }
-            }
-            
-            // Helpful hint instead of button
-            Text(
-                if (isRunning) "TAP SHIELD TO DISCONNECT" else "TAP SHIELD TO CONNECT", 
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold, 
-                color = if (isRunning) Color(0xFFE91E63).copy(alpha = 0.7f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                letterSpacing = 1.5.sp
-            )
-        }
-    }
-
+                        
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(
+                                value = bootstrapDns,
+                                onValueChange = onBootstrapChange,
+                                label = { Text("Bootstrap") },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(16.dp),
+                                singleLine = true,
+                                enabled = selectedProfileIndex == profiles.size - 1
+                            )
+                            OutlinedTextField(
+                                value = listenPort,
+                                onValueChange = onPortChange,
+                                label = { Text("Port") },
+                                modifier = Modifier.weight(0.7f),
+                                shape = RoundedCornerShape(16.dp),
+                                singleLine = true
+                            )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
     @Composable
     fun LogScreen(logs: Array<String>) {
         val context = LocalContext.current
@@ -557,9 +662,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
+        Column(modifier = Modifier.fillMaxSize().padding(vertical = 24.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -577,7 +682,10 @@ class MainActivity : ComponentActivity() {
             }
             Spacer(Modifier.height(20.dp))
             Card(
-                modifier = Modifier.fillMaxSize().weight(1f), 
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 12.dp), 
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
             ) {
@@ -955,8 +1063,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            
-            Spacer(modifier = Modifier.height(32.dp))
+
+            Spacer(modifier = Modifier.height(24.dp))
+
             Text(
                 if (isRunning) "SYSTEM PROTECTED" else "UNPROTECTED", 
                 style = MaterialTheme.typography.titleMedium, 
@@ -964,20 +1073,17 @@ class MainActivity : ComponentActivity() {
                 letterSpacing = 2.sp,
                 color = if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
             )
+
+            Spacer(modifier = Modifier.height(12.dp))
             
-            if (isRunning) {
-                Spacer(Modifier.height(12.dp))
-                Surface(
-                    color = (if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107)).copy(alpha = 0.1f),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(8.dp).background(if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107), CircleShape))
-                        Spacer(Modifier.width(8.dp))
-                        Text("${latency}ms", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
+            // Helpful hint moved below status
+            Text(
+                if (isRunning) "TAP SHIELD TO DISCONNECT" else "TAP SHIELD TO CONNECT", 
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold, 
+                color = if (isRunning) Color(0xFFE91E63).copy(alpha = 0.7f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                letterSpacing = 1.5.sp
+            )
         }
     }
 

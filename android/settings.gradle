@@ -39,7 +39,7 @@ dependencyResolutionManagement {
         def localMaven = getRustlsPlatformVerifierPath()
         if (localMaven) {
             maven {
-                url localMaven
+                url = localMaven
             }
         }
     }
