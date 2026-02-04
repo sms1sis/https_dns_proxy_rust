@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'io.github.https_dns_proxy_rust'
+    namespace 'io.github.SafeDNS'
     compileSdk 36
 
     defaultConfig {
-        applicationId "io.github.https_dns_proxy_rust"
+        applicationId "io.github.SafeDNS"
         minSdk 23
         targetSdk 36
         versionCode 5

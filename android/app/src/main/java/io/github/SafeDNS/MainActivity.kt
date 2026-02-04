@@ -1,4 +1,4 @@
-package io.github.https_dns_proxy_rust
+package io.github.SafeDNS
 
 import android.Manifest
 import android.content.Context
@@ -54,7 +54,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import io.github.https_dns_proxy_rust.ui.theme.HttpsDnsProxyTheme
+import io.github.SafeDNS.ui.theme.SafeDNSTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -103,7 +103,7 @@ class MainActivity : ComponentActivity() {
                 onDispose {}
             }
 
-            HttpsDnsProxyTheme(darkTheme = darkTheme, amoled = amoled) {
+            SafeDNSTheme(darkTheme = darkTheme, amoled = amoled) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background

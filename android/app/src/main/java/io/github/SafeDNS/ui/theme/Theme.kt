@@ -1,4 +1,4 @@
-package io.github.https_dns_proxy_rust.ui.theme
+package io.github.SafeDNS.ui.theme
 
 import android.app.Activity
 import android.os.Build
@@ -36,7 +36,7 @@ private val AmoledColorScheme = darkColorScheme(
 )
 
 @Composable
-fun HttpsDnsProxyTheme(
+fun SafeDNSTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     amoled: Boolean = false,
     dynamicColor: Boolean = true,

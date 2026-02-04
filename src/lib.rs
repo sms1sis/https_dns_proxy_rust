@@ -3,18 +3,20 @@ use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url, Proxy};
+use reqwest::dns::{Resolve, Resolving, Name, Addrs};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, Semaphore, mpsc};
 use tracing::{info, error, debug};
 use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts};
 use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::proto::op::Message;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::name_server::TokioConnectionProvider;
 use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::fs::File;
 use std::io::Read;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
 use bytes::Bytes;
 use moka::future::Cache;
@@ -89,7 +91,40 @@ pub struct Config {
     pub cache_ttl: u64,
 }
 
-type DnsCache = Cache<Bytes, Bytes>;
+type DnsCache = Cache<Bytes, (Bytes, u32)>;
+
+#[derive(Clone)]
+struct DynamicResolver {
+    hosts: Arc<RwLock<HashMap<String, Vec<SocketAddr>>>>,
+}
+
+impl DynamicResolver {
+    fn new() -> Self {
+        Self {
+            hosts: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn update(&self, domain: String, addr: SocketAddr) {
+        let mut hosts = self.hosts.write().await;
+        hosts.insert(domain, vec![addr]);
+    }
+}
+
+impl Resolve for DynamicResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let name_str = name.as_str().to_string();
+        let hosts = self.hosts.clone();
+        Box::pin(async move {
+            let hosts = hosts.read().await;
+            if let Some(addrs) = hosts.get(&name_str) {
+                Ok(Box::new(addrs.clone().into_iter()) as Addrs)
+            } else {
+                Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Host not found in DynamicResolver")) as Box<dyn std::error::Error + Send + Sync>)
+            }
+        })
+    }
+}
 
 pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.listen_addr, config.listen_port)
@@ -131,15 +166,16 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     let ip = resolve_bootstrap(&resolver_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
     info!("Bootstrapped {} to {}", resolver_domain, ip);
-    let client = create_client(&config, Some((resolver_domain.clone(), ip)))?;
+    
+    let dynamic_resolver = DynamicResolver::new();
+    dynamic_resolver.update(resolver_domain.clone(), ip).await;
 
-    let shared_client = Arc::new(RwLock::new(client));
+    let client = create_client(&config, dynamic_resolver.clone())?;
     let resolver_url_str = Arc::new(config.resolver_url.clone());
     
-    // DNS Cache: 2048 entries, TTL handled manually or by moka. 
+    // DNS Cache: 2048 entries
     let cache: DnsCache = Cache::builder()
         .max_capacity(2048)
-        .time_to_live(Duration::from_secs(config.cache_ttl))
         .build();
 
     #[cfg(feature = "jni")]
@@ -148,9 +184,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         *w = Some(cache.clone());
     }
 
-    // Bootstrap Refresh Loop
+    // Bootstrap Refresh Loop (updates DynamicResolver instead of recreating Client)
     let bootstrap_handle = {
-        let shared_client = shared_client.clone();
+        let dynamic_resolver = dynamic_resolver.clone();
         let config = config.clone();
         let domain = resolver_domain.clone();
         tokio::spawn(async move {
@@ -160,13 +196,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                 match resolve_bootstrap(&domain, &config.bootstrap_dns, config.allow_ipv6).await {
                     Ok(new_ip) => {
                         debug!("Refreshed bootstrap IP for {}: {}", domain, new_ip);
-                        match create_client(&config, Some((domain.clone(), new_ip))) {
-                            Ok(new_client) => {
-                                let mut w = shared_client.write().await;
-                                *w = new_client;
-                            }
-                            Err(e) => error!("Failed to create client: {}", e),
-                        }
+                        dynamic_resolver.update(domain.clone(), new_ip).await;
                     }
                     Err(e) => error!("Failed to refresh bootstrap IP: {}", e),
                 }
@@ -178,7 +208,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     let udp_loop = {
         let socket = udp_socket.clone();
-        let shared_client = shared_client.clone();
+        let client = client.clone();
         let resolver_url = resolver_url_str.clone();
         let stats = stats.clone();
         let cache = cache.clone();
@@ -189,13 +219,12 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                     Ok((len, peer)) => {
                         let data = Bytes::copy_from_slice(&buf[..len]);
                         let socket = socket.clone();
-                        let shared_client = shared_client.clone();
+                        let client = client.clone();
                         let resolver_url = resolver_url.clone();
                         let stats = stats.clone();
                         let cache = cache.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
-                            let client = shared_client.read().await.clone();
                             if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats, cache).await {
                                 debug!("UDP error from {}: {:#}", peer, e);
                             }
@@ -208,7 +237,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     };
 
     let tcp_loop = {
-        let shared_client = shared_client.clone();
+        let client = client.clone();
         let resolver_url = resolver_url_str.clone();
         let semaphore = tcp_semaphore.clone();
         let stats = stats.clone();
@@ -217,7 +246,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
             loop {
                 match tcp_listener.accept().await {
                     Ok((mut stream, peer)) => {
-                        let shared_client = shared_client.clone();
+                        let client = client.clone();
                         let resolver_url = resolver_url.clone();
                         let permit = semaphore.clone().acquire_owned().await;
                         let stats = stats.clone();
@@ -225,7 +254,6 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         tokio::spawn(async move {
                             let _permit = permit;
                             stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
-                            let client = shared_client.read().await.clone();
                             if let Err(e) = handle_tcp_query(&mut stream, client, resolver_url, stats, cache).await {
                                 debug!("TCP error from {}: {}", peer, e);
                             }
@@ -260,10 +288,10 @@ pub mod jni_api {
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_initLogger(
-        mut env: JNIEnv,
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_initLogger(
+        mut _env: JNIEnv,
         _class: JClass,
-        context: JObject,
+        _context: JObject,
     ) {
         #[cfg(target_os = "android")]
         {
@@ -280,7 +308,7 @@ pub mod jni_api {
                     .with_tag("https_dns_proxy"),
             );
 
-            match rustls_platform_verifier::android::init_hosted(&mut env, context) {
+            match rustls_platform_verifier::android::init_hosted(&mut _env, _context) {
                 Ok(_) => log::info!("Platform verifier initialized successfully"),
                 Err(e) => log::error!("Failed to init platform verifier: {:?}", e),
             }
@@ -288,7 +316,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_startProxy(
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_startProxy(
         mut env: JNIEnv,
         _class: JClass,
         listen_addr: JString,
@@ -356,7 +384,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_getLatency(
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLatency(
         _env: JNIEnv,
         _class: JClass,
     ) -> jint {
@@ -368,7 +396,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_getLogs(
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLogs(
         mut env: JNIEnv,
         _class: JClass,
     ) -> jni::sys::jobjectArray {
@@ -388,7 +416,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_stopProxy(
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_stopProxy(
         _env: JNIEnv,
         _class: JClass,
     ) {
@@ -399,7 +427,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_https_1dns_1proxy_1rust_ProxyService_clearCache(
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearCache(
         _env: JNIEnv,
         _class: JClass,
     ) {
@@ -432,8 +460,6 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
     }
 
     let mut opts = ResolverOpts::default();
-    // For bootstrapping the proxy itself, we prefer IPv4 to avoid "Network unreachable" on IPv4-only networks
-    // even if we are intercepting IPv6 DNS traffic.
     opts.ip_strategy = if allow_ipv6 {
         hickory_resolver::config::LookupIpStrategy::Ipv4thenIpv6
     } else {
@@ -445,16 +471,17 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
         .build();
     let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider")?;
     
-    // Prefer IPv4 for the same reason
     let ip = ips.iter().find(|ip| ip.is_ipv4()).or_else(|| ips.iter().find(|ip| ip.is_ipv6())).ok_or_else(|| anyhow::anyhow!("No IPs found"))?;
     
     Ok(SocketAddr::new(ip, 443))
 }
 
-fn create_client(config: &Config, resolve_override: Option<(String, SocketAddr)>) -> Result<Client> {
+fn create_client(config: &Config, resolver: DynamicResolver) -> Result<Client> {
     let mut builder = Client::builder()
+        .dns_resolver(Arc::new(resolver))
         .tls_backend_rustls()
         .pool_idle_timeout(Duration::from_secs(config.max_idle_time))
+        .pool_max_idle_per_host(32)
         .connect_timeout(Duration::from_secs(config.conn_loss_time));
 
     if config.http11 { builder = builder.http1_only(); }
@@ -473,10 +500,6 @@ fn create_client(config: &Config, resolve_override: Option<(String, SocketAddr)>
         let mut buf = Vec::new();
         File::open(ca_path)?.read_to_end(&mut buf)?;
         builder = builder.add_root_certificate(reqwest::Certificate::from_pem(&buf)?);
-    }
-
-    if let Some((domain, addr)) = resolve_override {
-        builder = builder.resolve(&domain, addr);
     }
 
     Ok(builder.no_proxy().build()?)
@@ -549,19 +572,17 @@ fn extract_domain(data: &[u8]) -> String {
 }
 
 async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Bytes, _stats: Arc<Stats>, cache: DnsCache) -> Result<Bytes> {
-    // 1. Check Cache (Zero-copy key using Bytes)
-    // We strip the ID (first 2 bytes) for caching to match multiple queries for the same domain
+    // 1. Check Cache
     if data.len() > 2 {
         let cache_key = data.slice(2..);
-        if let Some(cached_resp) = cache.get(&cache_key).await {
-            // Restore original ID from query
+        if let Some((cached_resp, ttl)) = cache.get(&cache_key).await {
             let mut resp = vec![0u8; cached_resp.len()];
             resp.copy_from_slice(&cached_resp);
             resp[0] = data[0];
             resp[1] = data[1];
             
             let domain = extract_domain(&data);
-            add_query_log(domain, "OK (Cache)".to_string());
+            add_query_log(domain, format!("OK (Cache, TTL {})", ttl));
             return Ok(Bytes::from(resp));
         }
     }
@@ -569,38 +590,50 @@ async fn forward_to_doh(client: Client, resolver_url: Arc<String>, data: Bytes, 
     let start = std::time::Instant::now();
     let domain = extract_domain(&data);
 
-    let resp = client
-        .post(&*resolver_url)
-        .header("content-type", "application/dns-message")
-        .header("accept", "application/dns-message")
-        .body(data.clone())
-        .send()
-        .await;
+    // Implement retries for robustness
+    let mut last_err = None;
+    for attempt in 0..2 {
+        let resp = client
+            .post(&*resolver_url)
+            .header("content-type", "application/dns-message")
+            .header("accept", "application/dns-message")
+            .body(data.clone())
+            .send()
+            .await;
 
-    match resp {
-        Ok(r) => {
-            if !r.status().is_success() {
-                add_query_log(domain, "Error (HTTP)".to_string());
-                return Err(anyhow::anyhow!("Resolver status {}", r.status()));
-            }
-            let bytes = r.bytes().await?;
-            let latency = start.elapsed().as_millis() as usize;
-            LAST_LATENCY.store(latency, Ordering::Relaxed);
-            add_query_log(domain, format!("OK ({}ms)", latency));
-            
-            // 2. Update Cache
-            if data.len() > 2 && bytes.len() > 2 {
-                let cache_key = data.slice(2..);
-                // We store the response with ID stripped (or just store it as is, but stripping is better for generic cache)
-                // Actually, storing the full bytes is fine since we slice it on retrieval.
-                cache.insert(cache_key, bytes.clone()).await;
-            }
+        match resp {
+            Ok(r) => {
+                if !r.status().is_success() {
+                    last_err = Some(anyhow::anyhow!("Resolver status {}", r.status()));
+                    continue;
+                }
+                let bytes = r.bytes().await?;
+                let latency = start.elapsed().as_millis() as usize;
+                LAST_LATENCY.store(latency, Ordering::Relaxed);
+                add_query_log(domain, format!("OK ({}ms, att {})", latency, attempt + 1));
+                
+                // 2. Update Cache with TTL extraction
+                if data.len() > 2 && bytes.len() > 2 {
+                    let cache_key = data.slice(2..);
+                    let mut ttl = 60; // Default TTL
+                    if let Ok(msg) = Message::from_vec(&bytes) {
+                        ttl = msg.answers().iter().map(|a| a.ttl()).min().unwrap_or(60);
+                        if ttl < 10 { ttl = 10; }
+                        if ttl > 3600 { ttl = 3600; }
+                    }
+                    cache.insert(cache_key, (bytes.clone(), ttl)).await;
+                }
 
-            Ok(bytes)
-        }
-        Err(e) => {
-            add_query_log(domain, "Error (Net)".to_string());
-            Err(e.into())
+                return Ok(bytes);
+            }
+            Err(e) => {
+                last_err = Some(e.into());
+                tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
+            }
         }
     }
+
+    add_query_log(domain, "Error (Net/HTTP)".to_string());
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Unknown error")))
 }
+

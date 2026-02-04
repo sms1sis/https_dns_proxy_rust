@@ -94,6 +94,10 @@ struct Args {
     #[arg(short = 's', long, default_value_t = 0)]
     statistic_interval: u64,
 
+    /// Cache TTL in seconds (default 60)
+    #[arg(long, default_value_t = 60)]
+    cache_ttl: u64,
+
     /// Print versions and exit
     #[arg(short = 'P', long)]
     print_version: bool,
@@ -140,6 +144,7 @@ async fn main() -> Result<()> {
         conn_loss_time: args.conn_loss_time,
         ca_path: args.ca_path,
         statistic_interval: args.statistic_interval,
+        cache_ttl: args.cache_ttl,
     };
 
     let stats = Arc::new(Stats::new());

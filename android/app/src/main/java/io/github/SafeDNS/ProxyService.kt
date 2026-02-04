@@ -1,4 +1,4 @@
-package io.github.https_dns_proxy_rust
+package io.github.SafeDNS
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
