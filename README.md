@@ -4,7 +4,7 @@ A lightweight, asynchronous DNS-over-HTTPS (DoH) proxy written in Rust, featurin
 
 This project is a modern, memory-safe Rust implementation of the original C-based https-dns-proxy, fully compliant with RFC 8484.
 
-## 📱 SafeDNS Android (Pro v0.3.0)
+## 📱 SafeDNS Android (Pro v0.3.1)
 
 SafeDNS includes a feature-rich Android app (arm64-v8a) that provides an encrypted tunnel for all your DNS traffic without requiring root.
 

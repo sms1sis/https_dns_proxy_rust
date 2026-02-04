@@ -8,7 +8,7 @@
 *   **Runtime:** Tokio (Async I/O)
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 
-## Recent Android Updates (v0.3.0)
+## Recent Android Updates (v0.3.1)
 
 *   **Rust 2024 Edition:** Core engine upgraded to Rust Edition 2024 using `std::sync::LazyLock` and modern asynchronous patterns.
 *   **IPv6 Support:** Implemented mandatory IPv6 UDP checksum calculation using the IPv6 pseudo-header for full DNS interception support.
