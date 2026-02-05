@@ -16,6 +16,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.ByteBuffer
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 class ProxyService : VpnService() {
@@ -23,12 +24,17 @@ class ProxyService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var heartbeatThread: Thread? = null
     private var currentHeartbeatDomain: String? = null
+    private val dnsExecutor = Executors.newFixedThreadPool(8)
     
     // Active configuration tracking
     private var runningPort: Int = 0
     private var runningUrl: String = ""
     private var runningBootstrap: String = ""
     private var runningCacheTtl: Long = 0
+    private var runningTcpLimit: Int = 0
+    private var runningPollInterval: Long = 0
+    private var runningHttp3: Boolean = false
+    private var runningHeartbeatDomain: String = ""
 
     companion object {
         const val CHANNEL_ID = "ProxyServiceChannel"
@@ -44,6 +50,8 @@ class ProxyService : VpnService() {
         @JvmStatic
         external fun getLogs(): Array<String>
         @JvmStatic
+        external fun clearLogs()
+        @JvmStatic
         external fun clearCache()
 
         init {
@@ -52,7 +60,18 @@ class ProxyService : VpnService() {
     }
 
     private external fun initLogger(context: Context)
-    private external fun startProxy(listenAddr: String, listenPort: Int, resolverUrl: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: Long): Int
+    private external fun startProxy(
+        listenAddr: String,
+        listenPort: Int,
+        resolverUrl: String,
+        bootstrapDns: String,
+        allowIpv6: Boolean,
+        cacheTtl: Long,
+        tcpLimit: Int,
+        pollInterval: Long,
+        useHttp3: Boolean,
+        excludeDomain: String
+    ): Int
     private external fun stopProxy()
 
     private var connectivityManager: android.net.ConnectivityManager? = null
@@ -96,6 +115,15 @@ class ProxyService : VpnService() {
         
         val cacheTtl = intent?.getLongExtra("cacheTtl", -1L).takeIf { it != null && it != -1L }
             ?: prefs.getString("cache_ttl", "300")?.toLongOrNull() ?: 300L
+
+        val tcpLimit = intent?.getIntExtra("tcpLimit", -1).takeIf { it != null && it != -1 }
+            ?: prefs.getString("tcp_limit", "20")?.toIntOrNull() ?: 20
+        
+        val pollInterval = intent?.getLongExtra("pollInterval", -1L).takeIf { it != null && it != -1L }
+            ?: prefs.getString("poll_interval", "120")?.toLongOrNull() ?: 120L
+        
+        val useHttp3 = intent?.getBooleanExtra("useHttp3", prefs.getBoolean("use_http3", false))
+            ?: prefs.getBoolean("use_http3", false)
         
         val heartbeatEnabled = intent?.getBooleanExtra("heartbeatEnabled", prefs.getBoolean("heartbeat_enabled", true)) 
             ?: prefs.getBoolean("heartbeat_enabled", true)
@@ -109,7 +137,10 @@ class ProxyService : VpnService() {
         Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl, heartbeat=$heartbeatEnabled")
 
         if (vpnInterface != null) {
-            val configChanged = runningPort != listenPort || runningUrl != resolverUrl || runningBootstrap != bootstrapDns || runningCacheTtl != cacheTtl
+            val configChanged = runningPort != listenPort || runningUrl != resolverUrl || 
+                               runningBootstrap != bootstrapDns || runningCacheTtl != cacheTtl ||
+                               runningTcpLimit != tcpLimit || runningPollInterval != pollInterval ||
+                               runningHttp3 != useHttp3 || runningHeartbeatDomain != heartbeatDomain
             
             if (configChanged) {
                 Log.d(TAG, "Dynamic config change detected. Restarting backend...")
@@ -119,11 +150,15 @@ class ProxyService : VpnService() {
                 runningUrl = resolverUrl
                 runningBootstrap = bootstrapDns
                 runningCacheTtl = cacheTtl
+                runningTcpLimit = tcpLimit
+                runningPollInterval = pollInterval
+                runningHttp3 = useHttp3
+                runningHeartbeatDomain = heartbeatDomain
                 
                 thread {
                     try { Thread.sleep(1000) } catch (e: InterruptedException) {}
-                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort with TTL $cacheTtl")
-                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl)
+                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
+                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
                     Log.d(TAG, "Backend proxy initialized (result: $res)")
                     
                     if (heartbeatEnabled) {
@@ -147,10 +182,14 @@ class ProxyService : VpnService() {
         runningUrl = resolverUrl
         runningBootstrap = bootstrapDns
         runningCacheTtl = cacheTtl
+        runningTcpLimit = tcpLimit
+        runningPollInterval = pollInterval
+        runningHttp3 = useHttp3
+        runningHeartbeatDomain = heartbeatDomain
 
         thread {
-            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort with TTL $cacheTtl")
-            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl)
+            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
+            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
         }
 
         try {
@@ -240,57 +279,76 @@ class ProxyService : VpnService() {
         val inputStream = FileInputStream(fd)
         val outputStream = FileOutputStream(fd)
         val packet = ByteBuffer.allocate(16384)
-        val udpSocket = DatagramSocket()
         val proxyAddr = InetAddress.getByName("127.0.0.1")
+        
         try {
             while (isProxyRunning) {
                 val length = inputStream.read(packet.array())
                 if (length > 0) {
-                    val data = packet.array()
+                    val data = packet.array().copyOf(length)
                     val version = (data[0].toInt() and 0xF0)
                     
                     if (version == 0x40 && data[9].toInt() == 17) { // IPv4 UDP
                         val ihl = (data[0].toInt() and 0x0F) * 4
                         val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
-                        if (dPort != 5053) { // Ignore local proxy traffic if it somehow leaks
-                             // Log.d(TAG, "IPv4 UDP packet: dPort=$dPort")
-                        }
                         if (dPort == 53) {
-                            val dnsPayload = data.copyOfRange(ihl + 8, length)
-                            udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
-                            val recvBuf = ByteArray(4096)
-                            val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
-                            udpSocket.soTimeout = 4000 
-                            try {
-                                udpSocket.receive(recvPacket)
-                                outputStream.write(constructIpv4Udp(data, recvPacket.data, recvPacket.length))
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Proxy timeout (IPv4)", e)
+                            dnsExecutor.execute {
+                                try {
+                                    val dnsPayload = data.copyOfRange(ihl + 8, length)
+                                    val response = handleDnsQuery(dnsPayload, proxyAddr, proxyPort)
+                                    if (response != null) {
+                                        synchronized(outputStream) {
+                                            outputStream.write(constructIpv4Udp(data, response.data, response.length))
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Parallel IPv4 DNS error", e)
+                                }
                             }
                         }
-                    } else if (version == 0x60) {
+                    } else if (version == 0x60) { // IPv6
                         val nextHeader = data[6].toInt() and 0xFF
-                        // Log.d(TAG, "IPv6 packet seen: nextHeader=$nextHeader")
                         if (nextHeader == 17) { // UDP
                             val dPort = ((data[42].toInt() and 0xFF) shl 8) or (data[43].toInt() and 0xFF)
                             if (dPort == 53) {
-                                val dnsPayload = data.copyOfRange(48, length)
-                                udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
-                                val recvBuf = ByteArray(4096)
-                                val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
-                                udpSocket.soTimeout = 4000
-                                                            try {
-                                                                udpSocket.receive(recvPacket)
-                                                                outputStream.write(constructIpv6Udp(data, recvPacket.data, recvPacket.length))
-                                                            } catch (e: Exception) {
-                                                                Log.e(TAG, "Proxy timeout (IPv6)", e)
-                                                            }                            }
+                                dnsExecutor.execute {
+                                    try {
+                                        val dnsPayload = data.copyOfRange(48, length)
+                                        val response = handleDnsQuery(dnsPayload, proxyAddr, proxyPort)
+                                        if (response != null) {
+                                            synchronized(outputStream) {
+                                                outputStream.write(constructIpv6Udp(data, response.data, response.length))
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Parallel IPv6 DNS error", e)
+                                    }
+                                }
+                            }
                         }
                     }
                     packet.clear()
                 }
             }
         } catch (e: Exception) {}
+    }
+
+    private fun handleDnsQuery(payload: ByteArray, proxyAddr: InetAddress, proxyPort: Int): DatagramPacket? {
+        var socket: DatagramSocket? = null
+        return try {
+            socket = DatagramSocket()
+            socket.soTimeout = 4000
+            socket.send(DatagramPacket(payload, payload.size, proxyAddr, proxyPort))
+            val recvBuf = ByteArray(4096)
+            val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
+            socket.receive(recvPacket)
+            recvPacket
+        } catch (e: Exception) {
+            Log.e(TAG, "DNS lookup failed: ${e.message}")
+            null
+        } finally {
+            socket?.close()
+        }
     }
 
     private fun constructIpv6Udp(request: ByteArray, payload: ByteArray, payloadLen: Int): ByteArray {
@@ -405,6 +463,7 @@ class ProxyService : VpnService() {
         isProxyRunning = false
         stopHeartbeat()
         stopProxy()
+        dnsExecutor.shutdown()
         try { vpnInterface?.close(); vpnInterface = null } catch (e: Exception) {}
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
         else { @Suppress("DEPRECATION") stopForeground(true) }

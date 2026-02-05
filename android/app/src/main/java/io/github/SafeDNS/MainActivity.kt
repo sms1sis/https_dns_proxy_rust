@@ -148,6 +148,9 @@ class MainActivity : ComponentActivity() {
         var autoStart by remember { mutableStateOf(prefs.getBoolean("auto_start", false)) }
         var allowIpv6 by remember { mutableStateOf(prefs.getBoolean("allow_ipv6", false)) }
         var cacheTtl by remember { mutableStateOf(prefs.getString("cache_ttl", "300") ?: "300") }
+        var tcpLimit by remember { mutableStateOf(prefs.getString("tcp_limit", "20") ?: "20") }
+        var pollInterval by remember { mutableStateOf(prefs.getString("poll_interval", "120") ?: "120") }
+        var useHttp3 by remember { mutableStateOf(prefs.getBoolean("use_http3", false)) }
         var heartbeatEnabled by remember { mutableStateOf(prefs.getBoolean("heartbeat_enabled", true)) }
         var heartbeatDomain by remember { mutableStateOf(prefs.getString("heartbeat_domain", "google.com") ?: "google.com") }
         var heartbeatInterval by remember { mutableStateOf(prefs.getString("heartbeat_interval", "10") ?: "10") }
@@ -156,6 +159,8 @@ class MainActivity : ComponentActivity() {
         var pendingHeartbeatDomain by remember { mutableStateOf(heartbeatDomain) }
         var pendingHeartbeatInterval by remember { mutableStateOf(heartbeatInterval) }
         var pendingCacheTtl by remember { mutableStateOf(cacheTtl) }
+        var pendingTcpLimit by remember { mutableStateOf(tcpLimit) }
+        var pendingPollInterval by remember { mutableStateOf(pollInterval) }
 
         val profiles = listOf(
             DnsProfile("Cloudflare", "https://cloudflare-dns.com/dns-query", "1.1.1.1"),
@@ -253,7 +258,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // Debounce effect for all settings
-        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl) {
+        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl, pendingTcpLimit, pendingPollInterval, useHttp3) {
             delay(1500) // Wait for 1.5s after user stops typing
             
             var changed = false
@@ -263,6 +268,8 @@ class MainActivity : ComponentActivity() {
             if (bootstrapDns != pendingBootstrapDns) { bootstrapDns = pendingBootstrapDns; changed = true }
             if (listenPort != pendingListenPort) { listenPort = pendingListenPort; changed = true }
             if (cacheTtl != pendingCacheTtl) { cacheTtl = pendingCacheTtl; changed = true }
+            if (tcpLimit != pendingTcpLimit) { tcpLimit = pendingTcpLimit; changed = true }
+            if (pollInterval != pendingPollInterval) { pollInterval = pendingPollInterval; changed = true }
 
             if (changed) {
                 prefs.edit()
@@ -273,11 +280,14 @@ class MainActivity : ComponentActivity() {
                     .putString("listen_port", listenPort)
                     .putBoolean("allow_ipv6", allowIpv6)
                     .putString("cache_ttl", cacheTtl)
+                    .putString("tcp_limit", tcpLimit)
+                    .putString("poll_interval", pollInterval)
+                    .putBoolean("use_http3", useHttp3)
                     .putInt("selected_profile", selectedProfileIndex)
                     .apply()
                 
                 if (isRunning) {
-                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                 }
             }
         }
@@ -286,7 +296,7 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == RESULT_OK) {
-                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                 isRunning = true
             }
         }
@@ -304,7 +314,7 @@ class MainActivity : ComponentActivity() {
                 val vpnIntent = VpnService.prepare(context)
                 if (vpnIntent != null) vpnPermissionLauncher.launch(vpnIntent)
                 else {
-                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                     isRunning = true
                 }
             }
@@ -319,6 +329,9 @@ class MainActivity : ComponentActivity() {
                         autoStart = autoStart,
                         allowIpv6 = allowIpv6,
                         cacheTtl = pendingCacheTtl,
+                        tcpLimit = pendingTcpLimit,
+                        pollInterval = pendingPollInterval,
+                        useHttp3 = useHttp3,
                         heartbeatEnabled = heartbeatEnabled,
                         heartbeatDomain = pendingHeartbeatDomain,
                         heartbeatInterval = pendingHeartbeatInterval,
@@ -333,15 +346,24 @@ class MainActivity : ComponentActivity() {
                             allowIpv6 = enabled
                             prefs.edit().putBoolean("allow_ipv6", enabled).apply()
                             if (isRunning) {
-                                startProxyService(resolverUrl, listenPort, bootstrapDns, enabled, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                                startProxyService(resolverUrl, listenPort, bootstrapDns, enabled, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                             }
                         },
                         onCacheTtlChange = { pendingCacheTtl = it },
+                        onTcpLimitChange = { pendingTcpLimit = it },
+                        onPollIntervalChange = { pendingPollInterval = it },
+                        onHttp3Change = { enabled ->
+                            useHttp3 = enabled
+                            prefs.edit().putBoolean("use_http3", enabled).apply()
+                            if (isRunning) {
+                                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, enabled, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                            }
+                        },
                         onHeartbeatChange = { enabled ->
                             heartbeatEnabled = enabled
                             prefs.edit().putBoolean("heartbeat_enabled", enabled).apply()
                             if (isRunning) {
-                                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, enabled, heartbeatDomain, heartbeatInterval)
+                                startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, enabled, heartbeatDomain, heartbeatInterval)
                             }
                         },
                         onHeartbeatDomainChange = { pendingHeartbeatDomain = it },
@@ -505,6 +527,7 @@ class MainActivity : ComponentActivity() {
         onPortChange: (String) -> Unit,
         onToggle: () -> Unit
     ) {
+        val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
         val infiniteTransition = rememberInfiniteTransition(label = "cardNeon")
         val rotation by infiniteTransition.animateFloat(
             initialValue = 0f,
@@ -618,25 +641,61 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        val isCustom = selectedProfileIndex == profiles.size - 1
+                        var textFieldValue by remember(resolverUrl) { 
+                            mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(
+                                text = resolverUrl,
+                                selection = androidx.compose.ui.text.TextRange(resolverUrl.length)
+                            )) 
+                        }
+
                         OutlinedTextField(
-                            value = resolverUrl,
-                            onValueChange = onUrlChange,
+                            value = textFieldValue,
+                            onValueChange = {
+                                textFieldValue = it
+                                if (isCustom) onUrlChange(it.text)
+                            },
                             label = { Text("Resolver Endpoint") },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
                             singleLine = true,
-                            enabled = selectedProfileIndex == profiles.size - 1 || profiles[selectedProfileIndex].url.isEmpty()
+                            readOnly = !isCustom,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri,
+                                autoCorrectEnabled = false,
+                                imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                            ),
+                            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                onDone = { focusManager.clearFocus() }
+                            )
                         )
                         
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            var bootstrapValue by remember(bootstrapDns) {
+                                mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(
+                                    text = bootstrapDns,
+                                    selection = androidx.compose.ui.text.TextRange(bootstrapDns.length)
+                                ))
+                            }
                             OutlinedTextField(
-                                value = bootstrapDns,
-                                onValueChange = onBootstrapChange,
+                                value = bootstrapValue,
+                                onValueChange = {
+                                    bootstrapValue = it
+                                    if (isCustom) onBootstrapChange(it.text)
+                                },
                                 label = { Text("Bootstrap") },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(16.dp),
                                 singleLine = true,
-                                enabled = selectedProfileIndex == profiles.size - 1
+                                readOnly = !isCustom,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal,
+                                    autoCorrectEnabled = false,
+                                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                                ),
+                                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                    onDone = { focusManager.clearFocus() }
+                                )
                             )
                             OutlinedTextField(
                                 value = listenPort,
@@ -644,7 +703,14 @@ class MainActivity : ComponentActivity() {
                                 label = { Text("Port") },
                                 modifier = Modifier.weight(0.7f),
                                 shape = RoundedCornerShape(16.dp),
-                                singleLine = true
+                                singleLine = true,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                                ),
+                                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                    onDone = { focusManager.clearFocus() }
+                                )
                             )
                                             }
                                         }
@@ -655,6 +721,7 @@ class MainActivity : ComponentActivity() {
     fun LogScreen(logs: Array<String>) {
         val context = LocalContext.current
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val scope = rememberCoroutineScope()
         
         LaunchedEffect(logs.size) {
             if (logs.isNotEmpty()) {
@@ -669,14 +736,44 @@ class MainActivity : ComponentActivity() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Network Activity", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Surface(
-                    onClick = { saveLogsToFile(context, logs) },
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    shape = CircleShape,
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.FileDownload, null, modifier = Modifier.size(20.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        onClick = { 
+                            ProxyService.clearLogs()
+                            android.widget.Toast.makeText(context, "Logs cleared", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                        shape = CircleShape,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.DeleteOutline, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    Surface(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            val clip = android.content.ClipData.newPlainText("SafeDNS Logs", logs.joinToString("\n"))
+                            clipboard.setPrimaryClip(clip)
+                            android.widget.Toast.makeText(context, "Logs copied to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = CircleShape,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    Surface(
+                        onClick = { saveLogsToFile(context, logs) },
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = CircleShape,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.FileDownload, null, modifier = Modifier.size(20.dp))
+                        }
                     }
                 }
             }
@@ -744,6 +841,9 @@ class MainActivity : ComponentActivity() {
         autoStart: Boolean,
         allowIpv6: Boolean,
         cacheTtl: String,
+        tcpLimit: String,
+        pollInterval: String,
+        useHttp3: Boolean,
         heartbeatEnabled: Boolean,
         heartbeatDomain: String,
         heartbeatInterval: String,
@@ -753,6 +853,9 @@ class MainActivity : ComponentActivity() {
         onAutoStartChange: (Boolean) -> Unit,
         onAllowIpv6Change: (Boolean) -> Unit,
         onCacheTtlChange: (String) -> Unit,
+        onTcpLimitChange: (String) -> Unit,
+        onPollIntervalChange: (String) -> Unit,
+        onHttp3Change: (Boolean) -> Unit,
         onHeartbeatChange: (Boolean) -> Unit,
         onHeartbeatDomainChange: (String) -> Unit,
         onHeartbeatIntervalChange: (String) -> Unit,
@@ -762,6 +865,7 @@ class MainActivity : ComponentActivity() {
         onClose: () -> Unit
     ) {
         val context = LocalContext.current
+        val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
         Column(modifier = Modifier.padding(24.dp).verticalScroll(rememberScrollState())) {
             Text("Preferences", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(32.dp))
@@ -833,15 +937,69 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(24.dp))
 
-            Text("DNS Cache TTL (seconds)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(8.dp))
+            Text("Advanced Settings", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(16.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("HTTP/3 (QUIC)", fontWeight = FontWeight.Bold)
+                    Text("Use modern high-speed protocol", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = useHttp3, onCheckedChange = onHttp3Change)
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Text("DNS Cache TTL (sec)", style = MaterialTheme.typography.labelMedium)
             OutlinedTextField(
                 value = cacheTtl,
                 onValueChange = onCacheTtlChange,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 singleLine = true,
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = { focusManager.clearFocus() }
+                )
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            Text("TCP Client Limit", style = MaterialTheme.typography.labelMedium)
+            OutlinedTextField(
+                value = tcpLimit,
+                onValueChange = onTcpLimitChange,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = { focusManager.clearFocus() }
+                )
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            Text("Bootstrap Refresh (sec)", style = MaterialTheme.typography.labelMedium)
+            OutlinedTextField(
+                value = pollInterval,
+                onValueChange = onPollIntervalChange,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = { focusManager.clearFocus() }
+                )
             )
 
             Spacer(Modifier.height(24.dp))
@@ -862,7 +1020,13 @@ class MainActivity : ComponentActivity() {
                     label = { Text("Ping Domain") },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onDone = { focusManager.clearFocus() }
+                    )
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
@@ -872,7 +1036,13 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     singleLine = true,
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Done
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onDone = { focusManager.clearFocus() }
+                    )
                 )
             }
             
@@ -1081,7 +1251,7 @@ class MainActivity : ComponentActivity() {
                 if (isRunning) "TAP SHIELD TO DISCONNECT" else "TAP SHIELD TO CONNECT", 
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold, 
-                color = if (isRunning) Color(0xFFE91E63).copy(alpha = 0.7f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                color = if (isRunning) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else Color(0xFFE91E63).copy(alpha = 0.7f),
                 letterSpacing = 1.5.sp
             )
         }
@@ -1098,7 +1268,7 @@ class MainActivity : ComponentActivity() {
             title = { Text("About SafeDNS") },
             text = {
                 Column {
-                    Text("Version: v0.3.2", fontWeight = FontWeight.Bold)
+                    Text("Version: v0.4.0", fontWeight = FontWeight.Bold)
                     Text("Developer: sms1sis")
                     Spacer(Modifier.height(16.dp))
                     
@@ -1137,7 +1307,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun checkForUpdates(context: android.content.Context, uriHandler: androidx.compose.ui.platform.UriHandler) {
         val repoUrl = "https://api.github.com/repos/sms1sis/https_dns_proxy_rust/releases/latest"
-        val currentVersion = "v0.3.2"
+        val currentVersion = "v0.4.0"
 
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
@@ -1169,13 +1339,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: String, heartbeatEnabled: Boolean, heartbeatDomain: String, heartbeatInterval: String) {
+    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: String, tcpLimit: String, pollInterval: String, useHttp3: Boolean, heartbeatEnabled: Boolean, heartbeatDomain: String, heartbeatInterval: String) {
         val intent = Intent(this, ProxyService::class.java).apply {
             putExtra("resolverUrl", resolverUrl)
             putExtra("listenPort", listenPort.toIntOrNull() ?: 5053)
             putExtra("bootstrapDns", bootstrapDns)
             putExtra("allowIpv6", allowIpv6)
             putExtra("cacheTtl", cacheTtl.toLongOrNull() ?: 300L)
+            putExtra("tcpLimit", tcpLimit.toIntOrNull() ?: 20)
+            putExtra("pollInterval", pollInterval.toLongOrNull() ?: 120L)
+            putExtra("useHttp3", useHttp3)
             putExtra("heartbeatEnabled", heartbeatEnabled)
             putExtra("heartbeatDomain", heartbeatDomain)
             putExtra("heartbeatInterval", heartbeatInterval.toLongOrNull() ?: 10L)
