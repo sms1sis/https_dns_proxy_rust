@@ -468,6 +468,7 @@ class MainActivity : ComponentActivity() {
                     .consumeWindowInsets(contentPadding)
                     .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
                     .fillMaxSize()) {
+                    
                     if (isRunning) {
                         Box(Modifier.fillMaxSize().background(
                             Brush.radialGradient(
