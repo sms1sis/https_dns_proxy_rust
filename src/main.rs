@@ -98,6 +98,10 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     cache_ttl: u64,
 
+    /// Optional domain to exclude from cache
+    #[arg(short = 'e', long)]
+    exclude_domain: Option<String>,
+
     /// Print versions and exit
     #[arg(short = 'P', long)]
     print_version: bool,
@@ -145,6 +149,7 @@ async fn main() -> Result<()> {
         ca_path: args.ca_path,
         statistic_interval: args.statistic_interval,
         cache_ttl: args.cache_ttl,
+        exclude_domain: args.exclude_domain,
     };
 
     let stats = Arc::new(Stats::new());
