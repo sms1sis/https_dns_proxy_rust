@@ -2,24 +2,19 @@ use std::net::{SocketAddr, IpAddr};
 use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use reqwest::{Client, Url, Proxy};
-use reqwest::dns::{Resolve, Resolving, Name, Addrs};
+use reqwest::{Client, Url};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, Semaphore, mpsc};
-use tracing::{info, error, debug};
-use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts};
-use hickory_resolver::proto::xfer::Protocol;
-use hickory_resolver::proto::op::Message;
-use hickory_resolver::TokioResolver;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use tokio::sync::{RwLock, mpsc};
+
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::fs::File;
-use std::io::Read;
 use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
 use bytes::Bytes;
 use moka::future::Cache;
+use jni::JavaVM;
+use jni::objects::JClass;
+use hickory_resolver::proto::op::Message;
 
 pub struct Stats {
     pub queries_udp: AtomicUsize,
@@ -32,7 +27,7 @@ struct LogMessage {
     status: String,
 }
 
-static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(50)));
+static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(50))));
 static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|| {
     let (tx, mut rx) = mpsc::unbounded_channel::<LogMessage>();
     tokio::spawn(async move {
@@ -48,20 +43,77 @@ static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|
     tx
 });
 
-#[cfg(feature = "jni")]
-static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+struct NativeLog {
+    level: String,
+    msg: String,
+}
+
+static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock::new(|| {
+    let (tx, mut rx) = mpsc::unbounded_channel::<NativeLog>();
+    
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            while let Some(log) = rx.recv().await {
+                match log.level.as_str() {
+                    "ERROR" => log::error!(target: "SafeDNS-Native", "{}", log.msg),
+                    "WARN" => log::warn!(target: "SafeDNS-Native", "{}", log.msg),
+                    "INFO" => log::info!(target: "SafeDNS-Native", "{}", log.msg),
+                    _ => log::debug!(target: "SafeDNS-Native", "{}", log.msg),
+                }
+
+                if let Ok(jvm_lock) = JVM.read() {
+                    if let Some(jvm) = jvm_lock.as_ref() {
+                        if let Ok(class_lock) = PROXY_SERVICE_CLASS.read() {
+                            if let Some(class_ref) = class_lock.as_ref() {
+                                if let Ok(mut env) = jvm.attach_current_thread() {
+                                    if let Ok(level_j) = env.new_string(&log.level) {
+                                        if let Ok(tag_j) = env.new_string("SafeDNS-Native") {
+                                            if let Ok(msg_j) = env.new_string(&log.msg) {
+                                                let _ = env.call_static_method(
+                                                    class_ref,
+                                                    "nativeLog",
+                                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                                                    &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    });
+    tx
+});
+
+fn native_log(level: &str, msg: &str) {
+    if !cfg!(debug_assertions) {
+        match level {
+            "ERROR" | "WARN" => {}
+            _ => return,
+        }
+    }
+    let _ = NATIVE_LOG_SENDER.send(NativeLog {
+        level: level.to_string(),
+        msg: msg.to_string(),
+    });
+}
+
 #[cfg(feature = "jni")]
 static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
 
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
 
+static JVM: LazyLock<std::sync::RwLock<Option<JavaVM>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::GlobalRef>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+
 fn add_query_log(domain: String, status: String) {
-    info!("QUERY: {} -> {}", domain, status);
     let _ = LOG_SENDER.send(LogMessage { domain, status });
 }
-
-impl Stats {
-    pub fn new() -> Self {
         Self {
             queries_udp: AtomicUsize::new(0),
             queries_tcp: AtomicUsize::new(0),
@@ -79,7 +131,7 @@ pub struct Config {
     pub polling_interval: u64,
     pub force_ipv4: bool,
     pub allow_ipv6: bool,
-    pub resolver_url: String,
+    pub resolver_url: String, 
     pub proxy_server: Option<String>,
     pub source_addr: Option<String>,
     pub http11: bool,
@@ -119,7 +171,7 @@ impl Resolve for DynamicResolver {
         Box::pin(async move {
             let hosts = hosts.read().await;
             if let Some(addrs) = hosts.get(&name_str) {
-                debug!("DynamicResolver: {} -> {:?}", name_str, addrs);
+                native_log("DEBUG", &format!("DynamicResolver: {} -> {:?}", name_str, addrs));
                 Ok(Box::new(addrs.clone().into_iter()) as Addrs)
             } else {
                 Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Host {} not found in DynamicResolver", name_str))) as Box<dyn std::error::Error + Send + Sync>)
@@ -175,7 +227,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                 break;
             }
             Err(e) => {
-                error!("Failed to bind sockets (attempt {}): {}", i + 1, e);
+                native_log("ERROR", &format!("Failed to bind sockets (attempt {}): {}", i + 1, e));
             }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -184,10 +236,10 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let udp_socket = udp_socket.context("Failed to bind UDP socket after retries")?;
     let tcp_listener = tcp_listener.context("Failed to bind TCP listener after retries")?;
 
-    info!("Listening on UDP/TCP {} -> {}", addr, config.resolver_url);
+    native_log("INFO", &format!("Listening on UDP/TCP {} -> {}", addr, config.resolver_url));
 
     let ips = resolve_bootstrap(&resolver_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
-    info!("Bootstrapped {} to {:?}", resolver_domain, ips);
+    native_log("INFO", &format!("Bootstrapped {} to {:?}", resolver_domain, ips));
     
     let dynamic_resolver = DynamicResolver::new();
     dynamic_resolver.update(resolver_domain.clone(), ips).await;
@@ -212,21 +264,21 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         let config = config.clone();
         let domain = resolver_domain.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(config.polling_interval));
+            let mut interval = tokio::time::interval(Duration::from_secs(config.polling_interval)));
             loop {
                 interval.tick().await;
                 match resolve_bootstrap(&domain, &config.bootstrap_dns, config.allow_ipv6).await {
                     Ok(new_ips) => {
-                        debug!("Refreshed bootstrap IPs for {}: {:?}", domain, new_ips);
+                        native_log("DEBUG", &format!("Refreshed bootstrap IPs for {}: {:?}", domain, new_ips));
                         dynamic_resolver.update(domain.clone(), new_ips).await;
                     }
-                    Err(e) => error!("Failed to refresh bootstrap IP: {}", e),
+                    Err(e) => native_log("ERROR", &format!("Failed to refresh bootstrap IP: {}", e)),
                 }
             }
         })
     };
 
-    let tcp_semaphore = Arc::new(Semaphore::new(config.tcp_client_limit));
+    let tcp_semaphore = Arc::new(Semaphore::new(config.tcp_client_limit)));
 
     let mut udp_loop = {
         let socket = udp_socket.clone();
@@ -251,11 +303,11 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
                             if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
-                                debug!("UDP error from {}: {:#}", peer, e);
+                                native_log("DEBUG", &format!("UDP error from {}: {:#}", peer, e));
                             }
                         });
                     }
-                    Err(e) => error!("UDP recv error: {}", e),
+                    Err(e) => native_log("ERROR", &format!("UDP recv error: {}", e)),
                 }
             }
         })
@@ -283,20 +335,20 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                             let _permit = permit;
                             stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
                             if let Err(e) = handle_tcp_query(&mut stream, client, resolver_url, stats, cache, cache_ttl, exclude_domain).await {
-                                debug!("TCP error from {}: {}", peer, e);
+                                native_log("DEBUG", &format!("TCP error from {}: {}", peer, e));
                             }
                         });
                     }
-                    Err(e) => error!("TCP accept error: {}", e),
+                    Err(e) => native_log("ERROR", &format!("TCP accept error: {}", e)),
                 }
             }
         })
     };
 
     tokio::select! {
-        _ = &mut shutdown_rx => info!("Shutting down proxy..."),
-        _ = &mut udp_loop => error!("UDP loop exited unexpectedly"),
-        _ = &mut tcp_loop => error!("TCP loop exited unexpectedly"),
+        _ = &mut shutdown_rx => native_log("INFO", &format!("Shutting down proxy...")),
+        _ = &mut udp_loop => native_log("ERROR", &format!("UDP loop exited unexpectedly")),
+        _ = &mut tcp_loop => native_log("ERROR", &format!("TCP loop exited unexpectedly")),
     }
 
     udp_loop.abort();
@@ -314,37 +366,46 @@ pub mod jni_api {
     use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
 
-    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap());
+    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap()));
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
     #[unsafe(no_mangle)]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_initLogger(
-        mut _env: JNIEnv,
+        mut env: JNIEnv,
         _class: JClass,
         _context: JObject,
     ) {
-        #[cfg(target_os = "android")]
-        {
-            use log::LevelFilter;
-            let level = if cfg!(debug_assertions) {
-                LevelFilter::Debug
-            } else {
-                LevelFilter::Info
-            };
+         let filter = if cfg!(debug_assertions) {
+             log::LevelFilter::Debug
+         } else {
+             log::LevelFilter::Info
+         };
 
-            android_logger::init_once(
-                android_logger::Config::default()
-                    .with_max_level(level)
-                    .with_tag("https_dns_proxy"),
-            );
+         android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(filter)
+                .with_tag("SafeDNS")
+         );
+         
+         if let Ok(jvm) = env.get_java_vm() {
+             if let Ok(mut w) = JVM.write() {
+                 *w = Some(jvm);
+             }
+         }
 
-            match rustls_platform_verifier::android::init_hosted(&mut _env, _context) {
-                Ok(_) => log::info!("Platform verifier initialized successfully"),
-                Err(e) => log::error!("Failed to init platform verifier: {:?}", e),
-            }
-        }
+         if let Ok(class) = env.find_class("io/github/SafeDNS/ProxyService") {
+             if let Ok(global_ref) = env.new_global_ref(class) {
+                 if let Ok(mut w) = PROXY_SERVICE_CLASS.write() {
+                     *w = Some(global_ref);
+                 }
+             }
+         }
+
+         #[cfg(target_os = "android")]
+         rustls_platform_verifier::android::init_hosted(&mut env, _context).ok();
+         native_log("INFO", "Logger, JVM and Global Class Ref initialized");
     }
-
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_startProxy(
         mut env: JNIEnv,
@@ -367,21 +428,23 @@ pub mod jni_api {
         let allow_ipv6 = allow_ipv6 != 0;
         let use_http3 = use_http3 != 0;
 
+        native_log("INFO", &format!("startProxy: addr={}, port={}, resolver={}", listen_addr, listen_port, resolver_url));
+
         let config = Config {
             listen_addr,
             listen_port: listen_port as u16,
-            tcp_client_limit: tcp_limit as usize,
+            resolver_url,
             bootstrap_dns,
+            allow_ipv6,
+            tcp_client_limit: tcp_limit as usize,
             polling_interval: poll_interval as u64,
             force_ipv4: !allow_ipv6,
-            allow_ipv6,
-            resolver_url,
             proxy_server: None,
             source_addr: None,
             http11: false,
             http3: use_http3,
-            max_idle_time: 118,
-            conn_loss_time: 15,
+            max_idle_time: 120,
+            conn_loss_time: 10,
             ca_path: None,
             statistic_interval: 0,
             cache_ttl: cache_ttl as u64,
@@ -413,7 +476,7 @@ pub mod jni_api {
             });
 
             if let Err(e) = run_proxy(config_clone, stats_clone, rx).await {
-                error!("Proxy error: {}", e);
+                native_log("ERROR", &format!("Proxy error: {}", e));
             }
         });
 
@@ -427,7 +490,7 @@ pub mod jni_api {
     ) -> jint {
         let lat = LAST_LATENCY.load(Ordering::Relaxed) as jint;
         if lat > 0 {
-            debug!("JNI getLatency: {}ms", lat);
+            native_log("DEBUG", &format!("JNI getLatency: {}ms", lat));
         }
         lat
     }
@@ -480,7 +543,7 @@ pub mod jni_api {
         RUNTIME.spawn(async {
             if let Some(cache) = &*GLOBAL_CACHE.read().await {
                 cache.invalidate_all();
-                debug!("DNS Cache cleared via JNI");
+                native_log("DEBUG", &format!("DNS Cache cleared via JNI"));
             }
         });
     }
@@ -579,7 +642,7 @@ async fn handle_udp_query(
         }
         Err(e) => {
             stats.errors.fetch_add(1, Ordering::Relaxed);
-            debug!("UDP error from {}: {:#}", peer, e);
+            native_log("DEBUG", &format!("UDP error from {}: {:#}", peer, e));
             Err(e)
         }
     }
@@ -756,7 +819,7 @@ async fn forward_to_doh(
         "Unknown Error".to_string()
     };
 
-    add_query_log(domain, format!("Error: {}", err_msg));
+    add_query_log(domain, format!("Error: {}", err_msg)));
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Unknown error")))
 }
 
