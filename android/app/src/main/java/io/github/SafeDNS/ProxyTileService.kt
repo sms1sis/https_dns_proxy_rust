@@ -19,8 +19,6 @@ class ProxyTileService : TileService() {
             }
             startService(intent)
         } else {
-            // We use default values for the Tile start. 
-            // A more advanced version could load user preferences.
             val intent = Intent(this, ProxyService::class.java)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 startForegroundService(intent)
@@ -28,7 +26,6 @@ class ProxyTileService : TileService() {
                 startService(intent)
             }
         }
-        // Small delay to allow service to update its state
         android.os.Handler(mainLooper).postDelayed({
             updateTile()
         }, 500)
@@ -39,7 +36,7 @@ class ProxyTileService : TileService() {
         val isRunning = ProxyService.isProxyRunning
         
         tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = "SafeDNS"
+        tile.label = getString(R.string.tile_label)
         
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             tile.subtitle = if (isRunning) "Active" else "Inactive"
