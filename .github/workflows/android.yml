@@ -28,7 +28,7 @@ jobs:
     - name: Set up Android NDK
       uses: nttld/setup-ndk@v1
       with:
-        ndk-version: r26b # Matching the version used in local builds if possible
+        ndk-version: r27c
 
     - name: Build Rust Core
       run: |
