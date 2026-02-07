@@ -25,7 +25,12 @@ use std::io::Read;
 pub struct Stats {
     pub queries_udp: AtomicUsize,
     pub queries_tcp: AtomicUsize,
+    pub queries_https: AtomicUsize,
+    pub cache_hits: AtomicUsize,
+    pub malformed: AtomicUsize,
     pub errors: AtomicUsize,
+    pub total_latency: AtomicUsize,
+    pub latency_count: AtomicUsize,
 }
 
 struct LogMessage {
@@ -129,7 +134,12 @@ impl Stats {
         Self {
             queries_udp: AtomicUsize::new(0),
             queries_tcp: AtomicUsize::new(0),
+            queries_https: AtomicUsize::new(0),
+            cache_hits: AtomicUsize::new(0),
+            malformed: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
+            total_latency: AtomicUsize::new(0),
+            latency_count: AtomicUsize::new(0),
         }
     }
 }
@@ -314,6 +324,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let exclude_domain = exclude_domain.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
+                            if extract_domain(&data) == "unknown" {
+                                stats.malformed.fetch_add(1, Ordering::Relaxed);
+                            }
                             if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
                                 native_log("DEBUG", &format!("UDP error from {}: {:#}", peer, e));
                             }
@@ -346,6 +359,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         tokio::spawn(async move {
                             let _permit = permit;
                             stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
+                            // We need to peek or read here, but handle_tcp_query already reads.
+                            // For simplicity, we just rely on handle_tcp_query errors or move extract_domain inside if needed.
+                            // Let's just track it inside handle_tcp_query for symmetry.
                             if let Err(e) = handle_tcp_query(&mut stream, client, resolver_url, stats, cache, cache_ttl, exclude_domain).await {
                                 native_log("DEBUG", &format!("TCP error from {}: {}", peer, e));
                             }
@@ -503,14 +519,23 @@ pub mod jni_api {
             GLOBAL_STATS.read().await.clone()
         });
 
-        let mut values = [0i32; 3];
+        let mut values = [0i32; 8];
         if let Some(stats) = stats_opt {
             values[0] = stats.queries_udp.load(Ordering::Relaxed) as i32;
             values[1] = stats.queries_tcp.load(Ordering::Relaxed) as i32;
-            values[2] = stats.errors.load(Ordering::Relaxed) as i32;
+            values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
+            values[3] = (stats.queries_udp.load(Ordering::Relaxed) + stats.queries_tcp.load(Ordering::Relaxed)) as i32;
+            
+            values[4] = stats.queries_https.load(Ordering::Relaxed) as i32;
+            values[5] = stats.cache_hits.load(Ordering::Relaxed) as i32;
+            values[6] = stats.errors.load(Ordering::Relaxed) as i32;
+            
+            let t_lat = stats.total_latency.load(Ordering::Relaxed);
+            let count = stats.latency_count.load(Ordering::Relaxed);
+            values[7] = if count > 0 { (t_lat / count) as i32 } else { 0 };
         }
 
-        let array = env.new_int_array(3).unwrap();
+        let array = env.new_int_array(8).unwrap();
         env.set_int_array_region(&array, 0, &values).unwrap();
         array.into_raw()
     }
@@ -525,7 +550,12 @@ pub mod jni_api {
         }) {
             stats.queries_udp.store(0, Ordering::Relaxed);
             stats.queries_tcp.store(0, Ordering::Relaxed);
+            stats.queries_https.store(0, Ordering::Relaxed);
+            stats.cache_hits.store(0, Ordering::Relaxed);
+            stats.malformed.store(0, Ordering::Relaxed);
             stats.errors.store(0, Ordering::Relaxed);
+            stats.total_latency.store(0, Ordering::Relaxed);
+            stats.latency_count.store(0, Ordering::Relaxed);
             native_log("INFO", "Traffic statistics cleared");
         }
     }
@@ -656,7 +686,7 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
 
 fn create_client(config: &Config, resolver: DynamicResolver) -> Result<Client> {
     let mut builder = Client::builder()
-        .user_agent("SafeDNS/0.4.0")
+        .user_agent("SafeDNS/0.5.0")
         .dns_resolver(Arc::new(resolver))
         .tls_backend_rustls()
         .tcp_nodelay(true)
@@ -731,6 +761,10 @@ async fn handle_tcp_query(
     stream.read_exact(&mut data).await?;
     let data = Bytes::from(data);
 
+    if extract_domain(&data) == "unknown" {
+        stats.malformed.fetch_add(1, Ordering::Relaxed);
+    }
+
     match forward_to_doh(client, resolver_url, data, stats.clone(), cache, cache_ttl_default, exclude_domain).await {
         Ok(bytes) => {
             let resp_len = (bytes.len() as u16).to_be_bytes();
@@ -775,7 +809,7 @@ async fn forward_to_doh(
     client: Client,
     resolver_url: Arc<String>,
     data: Bytes,
-    _stats: Arc<Stats>,
+    stats: Arc<Stats>,
     cache: DnsCache,
     cache_ttl_default: u64,
     exclude_domain: Option<String>,
@@ -804,6 +838,7 @@ async fn forward_to_doh(
                 resp[0] = original_id[0];
                 resp[1] = original_id[1];
                 
+                stats.cache_hits.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain, format!("OK (Cache, TTL {})", remaining));
                 return Ok(Bytes::from(resp));
             } else {
@@ -811,6 +846,9 @@ async fn forward_to_doh(
             }
         }
     }
+
+    // Increment HTTPS counter only if not served from cache
+    stats.queries_https.fetch_add(1, Ordering::Relaxed);
 
     // RFC 8484: The DNS message ID MUST be 0 in every DNS request.
     let mut request_data = data.to_vec();
@@ -843,6 +881,8 @@ async fn forward_to_doh(
                 let bytes = r.bytes().await?;
                 let latency = start.elapsed().as_millis() as usize;
                 LAST_LATENCY.store(latency, Ordering::Relaxed);
+                stats.total_latency.fetch_add(latency, Ordering::Relaxed);
+                stats.latency_count.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain.clone(), format!("OK ({}ms, att {})", latency, attempt + 1));
                 
                 // 2. Update Cache with TTL extraction

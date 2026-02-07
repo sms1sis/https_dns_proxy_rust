@@ -25,10 +25,19 @@ import io.github.SafeDNS.R
 @Composable
 fun StatsScreen(stats: IntArray) {
     val context = LocalContext.current
+    
+    // Inbound
     val udp = stats.getOrElse(0) { 0 }
     val tcp = stats.getOrElse(1) { 0 }
-    val errors = stats.getOrElse(2) { 0 }
-    val total = udp + tcp
+    val malformed = stats.getOrElse(2) { 0 }
+    val total = stats.getOrElse(3) { 0 }
+    
+    // Outbound
+    val https = stats.getOrElse(4) { 0 }
+    val cacheHits = stats.getOrElse(5) { 0 }
+    val errors = stats.getOrElse(6) { 0 }
+    val avgLat = stats.getOrElse(7) { 0 }
+
     val successRate = if (total > 0) {
         ((total - errors).toFloat() / total.toFloat() * 100).toInt().coerceIn(0, 100)
     } else null
@@ -110,10 +119,18 @@ fun StatsScreen(stats: IntArray) {
             }
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(32.dp))
 
-        // Grid of Stats
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        // --- Local Traffic Section ---
+        Text(
+            stringResource(R.string.local_traffic),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 4.dp)
+        )
+        Spacer(Modifier.height(16.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             StatCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.Dataset,
@@ -127,15 +144,54 @@ fun StatsScreen(stats: IntArray) {
                 value = tcp.toString()
             )
         }
-
-        Spacer(Modifier.height(16.dp))
-
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Spacer(Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             StatCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.Functions,
                 label = stringResource(R.string.total_queries),
                 value = total.toString()
+            )
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.Warning,
+                label = stringResource(R.string.malformed_queries),
+                value = malformed.toString()
+            )
+        }
+
+        Spacer(Modifier.height(32.dp))
+
+        // --- Remote Traffic Section ---
+        Text(
+            stringResource(R.string.remote_traffic),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 4.dp)
+        )
+        Spacer(Modifier.height(16.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.Security,
+                label = stringResource(R.string.https_queries),
+                value = https.toString()
+            )
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.OfflineBolt,
+                label = stringResource(R.string.cache_hits),
+                value = cacheHits.toString()
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.History,
+                label = stringResource(R.string.avg_latency),
+                value = if (avgLat > 0) "${avgLat}ms" else "--"
             )
             StatCard(
                 modifier = Modifier.weight(1f),
@@ -145,6 +201,8 @@ fun StatsScreen(stats: IntArray) {
                 isError = errors > 0
             )
         }
+        
+        Spacer(Modifier.height(32.dp))
     }
 }
 
@@ -156,19 +214,47 @@ fun StatCard(
     value: String,
     isError: Boolean = false
 ) {
-    val color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
+    val color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-        )
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.8f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Icon(icon, null, tint = color, modifier = Modifier.size(24.dp))
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Text(
+                    text = value,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = color,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
             Spacer(Modifier.height(12.dp))
-            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+            Text(
+                text = label.uppercase(),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
+                color = MaterialTheme.colorScheme.outline
+            )
         }
     }
 }
