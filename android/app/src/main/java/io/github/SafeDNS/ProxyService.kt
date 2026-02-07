@@ -39,6 +39,7 @@ class ProxyService : VpnService() {
     private var runningPollInterval: Long = 0
     private var runningHttp3: Boolean = false
     private var runningHeartbeatDomain: String = ""
+    private var runningExcludedApps: Set<String> = emptySet()
 
     companion object {
         const val CHANNEL_ID = "ProxyServiceChannel"
@@ -147,13 +148,16 @@ class ProxyService : VpnService() {
         val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", -1L).takeIf { it != null && it != -1L }
             ?: prefs.getString("heartbeat_interval", "10")?.toLongOrNull() ?: 10L
 
+        val excludedApps = prefs.getStringSet("excluded_apps", emptySet()) ?: emptySet()
+
         if (BuildConfig.DEBUG) Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl")
 
         if (vpnInterface != null) {
             val configChanged = runningPort != listenPort || runningUrl != resolverUrl || 
                                runningBootstrap != bootstrapDns || runningCacheTtl != cacheTtl ||
                                runningTcpLimit != tcpLimit || runningPollInterval != pollInterval ||
-                               runningHttp3 != useHttp3 || runningHeartbeatDomain != heartbeatDomain
+                               runningHttp3 != useHttp3 || runningHeartbeatDomain != heartbeatDomain ||
+                               runningExcludedApps != excludedApps
             
             if (configChanged) {
                 if (BuildConfig.DEBUG) Log.d(TAG, "Dynamic config change detected. Restarting backend...")
@@ -167,6 +171,7 @@ class ProxyService : VpnService() {
                 runningPollInterval = pollInterval
                 runningHttp3 = useHttp3
                 runningHeartbeatDomain = heartbeatDomain
+                runningExcludedApps = excludedApps
                 
                 serviceScope.launch {
                     delay(1000)
@@ -199,6 +204,7 @@ class ProxyService : VpnService() {
         runningPollInterval = pollInterval
         runningHttp3 = useHttp3
         runningHeartbeatDomain = heartbeatDomain
+        runningExcludedApps = excludedApps
 
         serviceScope.launch {
             if (BuildConfig.DEBUG) Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")

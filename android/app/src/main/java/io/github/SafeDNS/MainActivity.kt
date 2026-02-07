@@ -246,7 +246,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // Debounce effect
-        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl, pendingTcpLimit, pendingPollInterval, useHttp3) {
+        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl, pendingTcpLimit, pendingPollInterval, useHttp3, excludedApps) {
             delay(1500)
             
             var changed = false
