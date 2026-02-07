@@ -2,7 +2,9 @@
 set -e
 
 # 1. Point to your specific NDK version
-export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865
+if [ -z "$ANDROID_NDK_HOME" ]; then
+    export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865
+fi
 
 # 2. Add the NDK toolchain to your PATH so Cargo can find the 'clang' tools
 TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
