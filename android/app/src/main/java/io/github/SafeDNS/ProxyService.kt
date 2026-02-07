@@ -54,6 +54,10 @@ class ProxyService : VpnService() {
         @JvmStatic
         external fun getLogs(): Array<String>
         @JvmStatic
+        external fun getStats(): IntArray
+        @JvmStatic
+        external fun clearStats()
+        @JvmStatic
         external fun clearCache()
         @JvmStatic
         external fun clearLogs()
@@ -202,26 +206,36 @@ class ProxyService : VpnService() {
         }
 
         try {
-            vpnInterface = Builder()
+            val builder = Builder()
                 .setSession(getString(R.string.app_name))
                 .addAddress("10.0.0.1", 32)
                 .addDnsServer("10.0.0.2") // Virtual DNS IP
                 .addRoute("10.0.0.2", 32) // Route only the virtual DNS IP
-                .apply {
-                    if (allowIpv6) {
-                        addAddress("fd00::1", 128)
-                        addDnsServer("fd00::2")
-                        addRoute("fd00::2", 128)
-                    }
-                }
+                .setMtu(1500)
                 .setBlocking(true)
-                .apply {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        allowBypass()
-                        addDisallowedApplication(packageName)
+
+            if (allowIpv6) {
+                builder.addAddress("fd00::1", 128)
+                       .addDnsServer("fd00::2")
+                       .addRoute("fd00::2", 128)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                builder.allowBypass()
+                builder.addDisallowedApplication(packageName) // Always exclude ourselves
+                
+                // Exclude user-selected apps
+                val excludedApps = prefs.getStringSet("excluded_apps", emptySet()) ?: emptySet()
+                excludedApps.forEach { pkg ->
+                    try {
+                        builder.addDisallowedApplication(pkg)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to exclude app: $pkg")
                     }
                 }
-                .establish()
+            }
+
+            vpnInterface = builder.establish()
             
             if (BuildConfig.DEBUG) Log.d(TAG, "VPN Interface established (IPv6: $allowIpv6)")
             forwardJob = serviceScope.launch { 

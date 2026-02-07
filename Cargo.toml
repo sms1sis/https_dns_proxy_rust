@@ -15,6 +15,13 @@ crate-type = ["lib", "cdylib"]
 default = []
 jni = ["dep:jni", "dep:tokio-util"]
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["rustls", "socks", "http2", "http3"], default-features = false }
@@ -37,9 +44,3 @@ tokio-util = { version = "0.7", optional = true }
 log = "0.4"
 rustls-platform-verifier = { version = "0.6", features = ["jni"] }
 
-[profile.release]
-opt-level = 3       # Optimize for size and speed (balanced)
-lto = true            # Enable Link Time Optimization
-codegen-units = 1     # Reduce parallel code generation for better optimization
-panic = "abort"       # Abort on panic to remove stack unwinding code
-strip = true          # Automatically strip symbols from the binary

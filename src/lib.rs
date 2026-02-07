@@ -2,9 +2,10 @@ use std::net::{SocketAddr, IpAddr};
 use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use reqwest::{Client, Url};
+use reqwest::{Client, Url, Proxy};
+use reqwest::dns::{Resolve, Resolving, Name, Addrs};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, Semaphore, mpsc};
 
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,8 +14,13 @@ use std::sync::LazyLock;
 use bytes::Bytes;
 use moka::future::Cache;
 use jni::JavaVM;
-use jni::objects::JClass;
 use hickory_resolver::proto::op::Message;
+use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy};
+use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::TokioResolver;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use std::fs::File;
+use std::io::Read;
 
 pub struct Stats {
     pub queries_udp: AtomicUsize,
@@ -27,7 +33,7 @@ struct LogMessage {
     status: String,
 }
 
-static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(50))));
+static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(50)));
 static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|| {
     let (tx, mut rx) = mpsc::unbounded_channel::<LogMessage>();
     tokio::spawn(async move {
@@ -104,6 +110,9 @@ fn native_log(level: &str, msg: &str) {
 }
 
 #[cfg(feature = "jni")]
+static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+
+#[cfg(feature = "jni")]
 static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
 
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
@@ -114,6 +123,9 @@ static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::Glob
 fn add_query_log(domain: String, status: String) {
     let _ = LOG_SENDER.send(LogMessage { domain, status });
 }
+
+impl Stats {
+    pub fn new() -> Self {
         Self {
             queries_udp: AtomicUsize::new(0),
             queries_tcp: AtomicUsize::new(0),
@@ -264,7 +276,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         let config = config.clone();
         let domain = resolver_domain.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(config.polling_interval)));
+            let mut interval = tokio::time::interval(Duration::from_secs(config.polling_interval));
             loop {
                 interval.tick().await;
                 match resolve_bootstrap(&domain, &config.bootstrap_dns, config.allow_ipv6).await {
@@ -278,7 +290,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         })
     };
 
-    let tcp_semaphore = Arc::new(Semaphore::new(config.tcp_client_limit)));
+    let tcp_semaphore = Arc::new(Semaphore::new(config.tcp_client_limit));
 
     let mut udp_loop = {
         let socket = udp_socket.clone();
@@ -366,10 +378,9 @@ pub mod jni_api {
     use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
 
-    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap()));
+    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap());
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
-    #[unsafe(no_mangle)]
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_initLogger(
         mut env: JNIEnv,
@@ -484,6 +495,42 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getStats(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jni::sys::jintArray {
+        let stats_opt = RUNTIME.block_on(async {
+            GLOBAL_STATS.read().await.clone()
+        });
+
+        let mut values = [0i32; 3];
+        if let Some(stats) = stats_opt {
+            values[0] = stats.queries_udp.load(Ordering::Relaxed) as i32;
+            values[1] = stats.queries_tcp.load(Ordering::Relaxed) as i32;
+            values[2] = stats.errors.load(Ordering::Relaxed) as i32;
+        }
+
+        let array = env.new_int_array(3).unwrap();
+        env.set_int_array_region(&array, 0, &values).unwrap();
+        array.into_raw()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearStats(
+        _env: JNIEnv,
+        _class: JClass,
+    ) {
+        if let Some(stats) = RUNTIME.block_on(async {
+            GLOBAL_STATS.read().await.clone()
+        }) {
+            stats.queries_udp.store(0, Ordering::Relaxed);
+            stats.queries_tcp.store(0, Ordering::Relaxed);
+            stats.errors.store(0, Ordering::Relaxed);
+            native_log("INFO", "Traffic statistics cleared");
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLatency(
         _env: JNIEnv,
         _class: JClass,
@@ -570,15 +617,33 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
 
     let mut opts = ResolverOpts::default();
     opts.ip_strategy = if allow_ipv6 {
-        hickory_resolver::config::LookupIpStrategy::Ipv4thenIpv6
+        LookupIpStrategy::Ipv4thenIpv6
     } else {
-        hickory_resolver::config::LookupIpStrategy::Ipv4Only
+        LookupIpStrategy::Ipv4Only
     };
 
     let resolver = TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
         .with_options(opts)
         .build();
-    let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider")?;
+    
+    let ips = match resolver.lookup_ip(domain).await {
+        Ok(ips) => ips,
+        Err(e) => {
+            native_log("WARN", &format!("Full dual-stack lookup failed for {}, retrying with fallback nameservers: {:?}", domain, e));
+            let mut opts4 = ResolverOpts::default();
+            opts4.ip_strategy = LookupIpStrategy::Ipv4Only;
+            
+            // Try Cloudflare AND Google as fallbacks
+            let mut fallback_config = ResolverConfig::cloudflare();
+            fallback_config.add_name_server(NameServerConfig::new("8.8.8.8:53".parse()?, Protocol::Udp));
+            fallback_config.add_name_server(NameServerConfig::new("8.8.4.4:53".parse()?, Protocol::Udp));
+
+            let resolver4 = TokioResolver::builder_with_config(fallback_config, TokioConnectionProvider::default())
+                .with_options(opts4)
+                .build();
+            resolver4.lookup_ip(domain).await.context("Failed to resolve DoH provider (IPv4 retry)")?
+        }
+    };
     
     let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(ip, 443)).collect();
     
@@ -595,9 +660,10 @@ fn create_client(config: &Config, resolver: DynamicResolver) -> Result<Client> {
         .dns_resolver(Arc::new(resolver))
         .tls_backend_rustls()
         .tcp_nodelay(true)
-        .pool_idle_timeout(Duration::from_secs(30)) // Shorter idle timeout for mobile reliability
-        .pool_max_idle_per_host(8)
-        .connect_timeout(Duration::from_secs(10));
+        .pool_idle_timeout(Duration::from_secs(90)) // Optimized from OxidOH
+        .pool_max_idle_per_host(32) // Aggressive pooling
+        .tcp_keepalive(Some(Duration::from_secs(60))) // Keep connections alive
+        .connect_timeout(Duration::from_secs(5)); // Fast failover
 
     if config.http11 { 
         builder = builder.http1_only(); 
@@ -819,7 +885,7 @@ async fn forward_to_doh(
         "Unknown Error".to_string()
     };
 
-    add_query_log(domain, format!("Error: {}", err_msg)));
+    add_query_log(domain, format!("Error: {}", err_msg));
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Unknown error")))
 }
 
