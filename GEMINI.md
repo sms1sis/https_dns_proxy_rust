@@ -9,6 +9,17 @@
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 *   **Package Name:** `io.github.SafeDNS`
 
+## Recent Android Updates (v0.5.0)
+
+*   **Real-Time Traffic Dashboard:** Implemented a new "Stats" tab with logical grouping of Local (Inbound) and Remote (Outbound) traffic metrics.
+*   **Symmetric Performance Tracking:** Monitoring 8 distinct counters including UDP/TCP queries, Malformed packets, HTTPS requests, Cache Hits, and Average Latency.
+*   **Per-App Split Tunneling:** Added an "App Exclusion" feature to allow specific applications to bypass the proxy entirely.
+*   **Dynamic VPN Rebuild:** The service now automatically rebuilds the TUN interface 1.5s after app exclusion changes are detected, enabling real-time rule application.
+*   **Automated CI/CD:** Integrated GitHub Actions for automated Rust and Android builds, migrating the pipeline to **OpenJDK 21**.
+*   **Enhanced Pooling:** Optimized connection reuse with a 90s idle timeout and increased pool size (32 max) for flagship-tier performance.
+*   **Bootstrap Fallback Resolution:** Added an automated fallback to Cloudflare (`1.1.1.1`) and Google (`8.8.8.8`) DNS if the primary provider's domain fails to resolve during bootstrap.
+*   **Build Size Optimization:** Enabled LTO and symbol stripping in the release profile, reducing the JNI library size significantly.
+
 ## Recent Android Updates (v0.3.2)
 
 *   **Rebranding:** Fully rebranded as **SafeDNS** with a new package identity and polished UI.

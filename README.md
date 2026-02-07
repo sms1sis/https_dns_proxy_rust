@@ -4,21 +4,22 @@ A lightweight, asynchronous DNS-over-HTTPS (DoH) proxy written in Rust, featurin
 
 This project is a modern, memory-safe Rust implementation of the original C-based https-dns-proxy, fully compliant with RFC 8484.
 
-## 📱 SafeDNS Android (Pro v0.3.2)
+## 📱 SafeDNS Android (v0.5.0)
 
 SafeDNS includes a feature-rich Android app (arm64-v8a) that provides an encrypted tunnel for all your DNS traffic without requiring root.
 
 ### Features
 - **One-Tap Connection:** Merged status & power button for instant protection.
-- **Premium UI:** Modern, compact dashboard with dynamic pulsating animations.
+- **Traffic Dashboard:** Real-time monitoring of Local (UDP/TCP) and Remote (HTTPS/Cache) traffic.
+- **App Exclusion:** Per-app split-tunneling to bypass DNS proxy for selected applications.
+- **Performance Metrics:** Real-time calculation of success rates and average latency (ms).
+- **Automated CI/CD:** Continuous Integration via GitHub Actions using OpenJDK 21.
 - **IPv6 Support:** Mandatory IPv6 UDP checksum calculation for full IPv6 DNS interception.
-- **Cache Control:** Configurable DNS TTL (seconds) and manual cache clearing.
+- **Cache Control:** Configurable DNS TTL (seconds), manual cache clearing, and live hit tracking.
 - **TLS Verification:** Native Android certificate trust via `rustls-platform-verifier`.
 - **AMOLED Theme:** Pure black theme for battery savings on OLED screens.
-- **DNS Profiles:** Pre-configured support for Cloudflare, Google, AdGuard, and Quad9.
-- **Real-time Metrics:** Live latency (ms) tracking with a configurable heartbeat interval.
+- **DNS Profiles:** Pre-configured support for Cloudflare, Google, AdGuard, and Quad9 with fallback resolution.
 - **Activity Logs:** Chronological DNS query logs with auto-scroll and export-to-file capability.
-- **Smart Routing:** Split-tunneling via `VpnService` to ensure global internet stability.
 - **Auto-Start:** Automatically resume protection after device reboot.
 - **Quick Settings:** Toggle DNS protection directly from the Android notification shade.
 
