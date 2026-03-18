@@ -26,8 +26,8 @@ strip = true
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["rustls", "socks", "http2", "http3"], default-features = false }
 clap = { version = "4", features = ["derive"] }
-tracing = { version = "0.1", features = ["log"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2"
 anyhow = "1"
 bytes = "1"
@@ -36,11 +36,10 @@ hickory-resolver = "0.25"
 nix = { version = "0.31.1", features = ["user", "fs"] }
 daemonize = "0.5"
 chrono = "0.4"
-android_logger = "0.15"
+android_logger = "0.15.1"
 moka = { version = "0.12", features = ["future"] }
-socket2 = { version = "0.6.2", features = ["all"] }
+socket2 = { version = "0.6.3", features = ["all"] }
 jni = { version = "0.21", optional = true }
 tokio-util = { version = "0.7", optional = true }
 log = "0.4"
-rustls-platform-verifier = { version = "0.6", features = ["jni"] }
-
+rustls-platform-verifier = { version = "0.6.2", features = ["jni"] }
