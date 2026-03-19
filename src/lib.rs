@@ -732,9 +732,14 @@ fn create_client(config: &Config, resolver: DynamicResolver) -> Result<Client> {
 
     if config.http11 { 
         builder = builder.http1_only(); 
-    } else {
-        // Standard negotiation (H2/H3) is more reliable than prior_knowledge
+    } else if config.http3 {
+        // HTTP/3 requires ALPN negotiation or prior knowledge
+        // In reqwest 0.12, enabling http3 feature and setting version on request is common
+        // but we can also set it here.
         builder = builder.http2_adaptive_window(true);
+    } else {
+        // Force HTTP/2 only if not http3 or http11
+        builder = builder.http2_prior_knowledge().http2_adaptive_window(true);
     }
 
     if let Some(proxy_url) = &config.proxy_server {
@@ -918,7 +923,7 @@ async fn forward_to_doh(
                 LAST_LATENCY.store(latency, Ordering::Relaxed);
                 stats.total_latency.fetch_add(latency, Ordering::Relaxed);
                 stats.latency_count.fetch_add(1, Ordering::Relaxed);
-                add_query_log(domain.clone(), format!("OK ({}ms, att {})", latency, attempt + 1));
+                add_query_log(domain.clone(), format!("OK ({}ms, v{:?}, att {})", latency, version, attempt + 1));
                 
                 // 2. Update Cache with TTL extraction
                 if should_cache && bytes.len() > 2 {
