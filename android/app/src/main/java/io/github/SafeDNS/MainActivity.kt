@@ -155,6 +155,7 @@ class MainActivity : ComponentActivity() {
             DnsProfile("Google", "https://dns.google/dns-query", "8.8.8.8"),
             DnsProfile("AdGuard", "https://dns.adguard-dns.com/dns-query", "94.140.14.14"),
             DnsProfile("Quad9", "https://dns.quad9.net/dns-query", "9.9.9.9"),
+            DnsProfile("Mullvad", "https://all.dns.mullvad.net/dns-query", "194.242.2.9"),
             DnsProfile("Custom", "", "")
         )
         

@@ -4,7 +4,7 @@ A lightweight, asynchronous DNS-over-HTTPS (DoH) proxy written in Rust, featurin
 
 This project is a modern, memory-safe Rust implementation of the original C-based https-dns-proxy, fully compliant with RFC 8484.
 
-## 📱 SafeDNS Android (Pro v0.3.2)
+## 📱 SafeDNS Android (Pro v0.5.1)
 
 SafeDNS includes a feature-rich Android app (arm64-v8a) that provides an encrypted tunnel for all your DNS traffic without requiring root.
 
@@ -15,7 +15,7 @@ SafeDNS includes a feature-rich Android app (arm64-v8a) that provides an encrypt
 - **Cache Control:** Configurable DNS TTL (seconds) and manual cache clearing.
 - **TLS Verification:** Native Android certificate trust via `rustls-platform-verifier`.
 - **AMOLED Theme:** Pure black theme for battery savings on OLED screens.
-- **DNS Profiles:** Pre-configured support for Cloudflare, Google, AdGuard, and Quad9.
+- **DNS Profiles:** Pre-configured support for Cloudflare, Google, AdGuard, Quad9, and Mullvad.
 - **Real-time Metrics:** Live latency (ms) tracking with a configurable heartbeat interval.
 - **Activity Logs:** Chronological DNS query logs with auto-scroll and export-to-file capability.
 - **Smart Routing:** Split-tunneling via `VpnService` to ensure global internet stability.
