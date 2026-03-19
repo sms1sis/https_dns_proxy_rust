@@ -545,20 +545,36 @@ pub mod jni_api {
             GLOBAL_STATS.read().await.clone()
         });
 
+        let cache_count = RUNTIME.block_on(async {
+            if let Some(cache) = &*GLOBAL_CACHE.read().await {
+                cache.entry_count()
+            } else {
+                0
+            }
+        });
+
         let mut values = [0i32; 8];
         if let Some(stats) = stats_opt {
-            values[0] = stats.queries_udp.load(Ordering::Relaxed) as i32;
-            values[1] = stats.queries_tcp.load(Ordering::Relaxed) as i32;
-            values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
-            values[3] = (stats.queries_udp.load(Ordering::Relaxed) + stats.queries_tcp.load(Ordering::Relaxed)) as i32;
-            
-            values[4] = stats.queries_https.load(Ordering::Relaxed) as i32;
-            values[5] = stats.cache_hits.load(Ordering::Relaxed) as i32;
-            values[6] = stats.errors.load(Ordering::Relaxed) as i32;
-            
+            let udp = stats.queries_udp.load(Ordering::Relaxed);
+            let tcp = stats.queries_tcp.load(Ordering::Relaxed);
+            let hits = stats.cache_hits.load(Ordering::Relaxed);
+            let https = stats.queries_https.load(Ordering::Relaxed);
+            let errs = stats.errors.load(Ordering::Relaxed);
             let t_lat = stats.total_latency.load(Ordering::Relaxed);
             let count = stats.latency_count.load(Ordering::Relaxed);
-            values[7] = if count > 0 { (t_lat / count) as i32 } else { 0 };
+            let avg_lat = if count > 0 { (t_lat / count) as i32 } else { 0 };
+
+            native_log("DEBUG", &format!("JNI getStats: udp={}, tcp={}, hits={}, https={}, err={}, lat={}ms, cache_size={}", udp, tcp, hits, https, errs, avg_lat, cache_count));
+
+            values[0] = udp as i32;
+            values[1] = tcp as i32;
+            values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
+            values[3] = (udp + tcp) as i32;
+            
+            values[4] = https as i32;
+            values[5] = hits as i32;
+            values[6] = errs as i32;
+            values[7] = avg_lat;
         }
 
         let array = env.new_int_array(8).unwrap();
@@ -643,10 +659,10 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) {
-        RUNTIME.spawn(async {
+        RUNTIME.block_on(async {
             if let Some(cache) = &*GLOBAL_CACHE.read().await {
                 cache.invalidate_all();
-                native_log("DEBUG", &format!("DNS Cache cleared via JNI"));
+                native_log("INFO", "DNS Cache cleared via JNI");
             }
         });
     }
