@@ -68,8 +68,9 @@ class ProxyService : VpnService() {
             when (level) {
                 "ERROR" -> Log.e(tag, message)
                 "WARN" -> Log.w(tag, message)
-                "INFO" -> if (BuildConfig.DEBUG) Log.i(tag, message)
-                else -> if (BuildConfig.DEBUG) Log.d(tag, message)
+                "INFO" -> Log.i(tag, message)
+                "DEBUG" -> Log.d(tag, message)
+                else -> Log.v(tag, message)
             }
         }
 
@@ -374,12 +375,14 @@ class ProxyService : VpnService() {
     private fun handleDnsQuery(payload: ByteArray, proxyAddr: InetAddress, proxyPort: Int): DatagramPacket? {
         var socket: DatagramSocket? = null
         return try {
+            if (BuildConfig.DEBUG) Log.d(TAG, "Outbound DNS query: ${payload.size} bytes to $proxyAddr:$proxyPort")
             socket = DatagramSocket()
             socket.soTimeout = 4000
             socket.send(DatagramPacket(payload, payload.size, proxyAddr, proxyPort))
             val recvBuf = ByteArray(4096)
             val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
             socket.receive(recvPacket)
+            if (BuildConfig.DEBUG) Log.d(TAG, "Inbound DNS response: ${recvPacket.length} bytes from $proxyAddr:$proxyPort")
             recvPacket
         } catch (e: Exception) {
             Log.e(TAG, "DNS lookup failed: ${e.message}")

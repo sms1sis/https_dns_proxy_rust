@@ -203,6 +203,7 @@ impl Resolve for DynamicResolver {
 }
 
 pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
+    native_log("INFO", "run_proxy: Starting...");
     let addr: SocketAddr = format!("{}:{}", config.listen_addr, config.listen_port)
         .parse()
         .context("Failed to parse listen address")?;
@@ -211,33 +212,58 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         .context("Failed to parse resolver URL")?;
     let resolver_domain = resolver_url_parsed.domain().context("Resolver URL must have a domain")?.to_string();
 
+    native_log("INFO", &format!("run_proxy: Binding sockets to {}...", addr));
     // Retry binding to handle transient port conflicts during restarts
     let mut udp_socket = None;
     let mut tcp_listener = None;
     for i in 0..5 {
+        native_log("DEBUG", &format!("run_proxy: Bind attempt {}...", i + 1));
         let bind_result = (|| {
+            native_log("DEBUG", "run_proxy: Creating UDP socket2::Socket...");
             let udp_sock = socket2::Socket::new(
                 if addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 },
                 socket2::Type::DGRAM,
                 Some(socket2::Protocol::UDP),
             )?;
+            native_log("DEBUG", "run_proxy: Setting SO_REUSEADDR on UDP socket...");
             udp_sock.set_reuse_address(true)?;
             #[cfg(unix)]
-            udp_sock.set_reuse_port(true)?;
+            {
+                native_log("DEBUG", "run_proxy: Setting SO_REUSEPORT on UDP socket...");
+                udp_sock.set_reuse_port(true)?;
+            }
+            native_log("DEBUG", &format!("run_proxy: Binding UDP socket to {}...", addr));
             udp_sock.bind(&addr.into())?;
-            let udp_tokio = UdpSocket::from_std(udp_sock.into())?;
+            native_log("DEBUG", "run_proxy: Converting to std::net::UdpSocket...");
+            let udp_std: std::net::UdpSocket = udp_sock.into();
+            native_log("DEBUG", "run_proxy: Setting non-blocking for UDP...");
+            udp_std.set_nonblocking(true)?;
+            native_log("DEBUG", "run_proxy: Creating tokio::net::UdpSocket::from_std...");
+            let udp_tokio = UdpSocket::from_std(udp_std)?;
 
+            native_log("DEBUG", "run_proxy: Creating TCP socket2::Socket...");
             let tcp_sock = socket2::Socket::new(
                 if addr.is_ipv4() { socket2::Domain::IPV4 } else { socket2::Domain::IPV6 },
                 socket2::Type::STREAM,
                 Some(socket2::Protocol::TCP),
             )?;
+            native_log("DEBUG", "run_proxy: Setting SO_REUSEADDR on TCP socket...");
             tcp_sock.set_reuse_address(true)?;
             #[cfg(unix)]
-            tcp_sock.set_reuse_port(true)?;
+            {
+                native_log("DEBUG", "run_proxy: Setting SO_REUSEPORT on TCP socket...");
+                tcp_sock.set_reuse_port(true)?;
+            }
+            native_log("DEBUG", &format!("run_proxy: Binding TCP socket to {}...", addr));
             tcp_sock.bind(&addr.into())?;
+            native_log("DEBUG", "run_proxy: Listening on TCP socket...");
             tcp_sock.listen(128)?;
-            let tcp_tokio = TcpListener::from_std(tcp_sock.into())?;
+            native_log("DEBUG", "run_proxy: Converting to std::net::TcpListener...");
+            let tcp_std: std::net::TcpListener = tcp_sock.into();
+            native_log("DEBUG", "run_proxy: Setting non-blocking for TCP...");
+            tcp_std.set_nonblocking(true)?;
+            native_log("DEBUG", "run_proxy: Creating tokio::net::TcpListener::from_std...");
+            let tcp_tokio = TcpListener::from_std(tcp_std)?;
 
             Ok::<(UdpSocket, TcpListener), anyhow::Error>((udp_tokio, tcp_tokio))
         })();
@@ -246,6 +272,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
             Ok((u, t)) => {
                 udp_socket = Some(Arc::new(u));
                 tcp_listener = Some(t);
+                native_log("INFO", &format!("run_proxy: Sockets bound on attempt {}", i + 1));
                 break;
             }
             Err(e) => {
@@ -258,8 +285,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let udp_socket = udp_socket.context("Failed to bind UDP socket after retries")?;
     let tcp_listener = tcp_listener.context("Failed to bind TCP listener after retries")?;
 
-    native_log("INFO", &format!("Listening on UDP/TCP {} -> {}", addr, config.resolver_url));
-
+    native_log("INFO", &format!("run_proxy: Resolving bootstrap for {}...", resolver_domain));
     let ips = resolve_bootstrap(&resolver_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
     native_log("INFO", &format!("Bootstrapped {} to {:?}", resolver_domain, ips));
     
@@ -627,6 +653,7 @@ pub mod jni_api {
 }
 
 async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) -> Result<Vec<SocketAddr>> {
+    native_log("INFO", &format!("resolve_bootstrap: domain={}, bootstrap_dns={}, ipv6={}", domain, bootstrap_dns, allow_ipv6));
     let servers: Vec<SocketAddr> = bootstrap_dns
         .split(',')
         .map(|s| {
@@ -638,6 +665,8 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
             }
         })
         .collect();
+
+    native_log("INFO", &format!("resolve_bootstrap: Using bootstrap servers: {:?}", servers));
 
     let mut config = ResolverConfig::new();
     for s in servers {
@@ -656,8 +685,12 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
         .with_options(opts)
         .build();
     
+    native_log("INFO", &format!("resolve_bootstrap: Querying Hickory for {}...", domain));
     let ips = match resolver.lookup_ip(domain).await {
-        Ok(ips) => ips,
+        Ok(ips) => {
+            native_log("INFO", &format!("resolve_bootstrap: Hickory resolved {} to {:?}", domain, ips));
+            ips
+        },
         Err(e) => {
             native_log("WARN", &format!("Full dual-stack lookup failed for {}, retrying with fallback nameservers: {:?}", domain, e));
             let mut opts4 = ResolverOpts::default();
@@ -671,6 +704,8 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
             let resolver4 = TokioResolver::builder_with_config(fallback_config, TokioConnectionProvider::default())
                 .with_options(opts4)
                 .build();
+            
+            native_log("INFO", "resolve_bootstrap: Querying Hickory (IPv4 fallback) for domain...");
             resolver4.lookup_ip(domain).await.context("Failed to resolve DoH provider (IPv4 retry)")?
         }
     };
@@ -686,14 +721,14 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
 
 fn create_client(config: &Config, resolver: DynamicResolver) -> Result<Client> {
     let mut builder = Client::builder()
-        .user_agent("SafeDNS/0.5.0")
+        .user_agent(format!("SafeDNS/{}", env!("CARGO_PKG_VERSION")))
         .dns_resolver(Arc::new(resolver))
-        .tls_backend_rustls()
+        .tls_built_in_webpki_certs(true)
         .tcp_nodelay(true)
-        .pool_idle_timeout(Duration::from_secs(90)) // Optimized from OxidOH
-        .pool_max_idle_per_host(32) // Aggressive pooling
-        .tcp_keepalive(Some(Duration::from_secs(60))) // Keep connections alive
-        .connect_timeout(Duration::from_secs(5)); // Fast failover
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(32)
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .connect_timeout(Duration::from_secs(5));
 
     if config.http11 { 
         builder = builder.http1_only(); 

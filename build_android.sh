@@ -13,11 +13,30 @@ export PATH=$TOOLCHAIN:$PATH
 # Define target - focusing ONLY on arm64-v8a (ARMv8-A)
 TARGET="aarch64-linux-android"
 
+# Default build mode
+BUILD_MODE="release"
+CARGO_FLAGS="--release"
+
+# Parse arguments
+while getopts "d" opt; do
+  case $opt in
+    d)
+      BUILD_MODE="debug"
+      CARGO_FLAGS=""
+      echo "Building in DEBUG mode..."
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+  esac
+done
+
 # Optimization flags for ARMv8-A
 export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon --cfg reqwest_unstable"
 
 echo "Using NDK from: $ANDROID_NDK_HOME"
-echo "Building for ARMv8-A (arm64-v8a)..."
+echo "Building for ARMv8-A (arm64-v8a) [$BUILD_MODE]..."
 
 # Ensure cargo-ndk is installed
 if ! command -v cargo-ndk &> /dev/null; then
@@ -25,11 +44,18 @@ if ! command -v cargo-ndk &> /dev/null; then
     cargo install cargo-ndk
 fi
 
+# Sync version from build.gradle to Cargo.toml
+VERSION=$(grep "versionName" android/app/build.gradle | head -n 1 | awk -F'"' '{print $2}')
+if [ -n "$VERSION" ]; then
+    echo "Syncing Cargo.toml version to $VERSION (from build.gradle)..."
+    sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+fi
+
 echo "--------------------------------------------------"
 echo "Building for $TARGET..."
 
 # Build with JNI feature
-cargo ndk --target "$TARGET" --platform 26 build --release --lib --features jni
+cargo ndk --target "$TARGET" --platform 26 build $CARGO_FLAGS --lib --features jni
 
 echo "--------------------------------------------------"
 echo "Build complete! Collecting libraries..."
@@ -38,6 +64,6 @@ echo "Build complete! Collecting libraries..."
 OUTPUT_DIR="android/app/src/main/jniLibs"
 mkdir -p "$OUTPUT_DIR/arm64-v8a"
 
-cp target/$TARGET/release/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/arm64-v8a/"
+cp target/$TARGET/$BUILD_MODE/libhttps_dns_proxy_rust.so "$OUTPUT_DIR/arm64-v8a/"
 
 echo "All libraries collected in $OUTPUT_DIR/"
