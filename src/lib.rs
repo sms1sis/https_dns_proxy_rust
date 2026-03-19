@@ -166,7 +166,7 @@ pub struct Config {
     pub exclude_domain: Option<String>,
 }
 
-type DnsCache = Cache<Bytes, (Bytes, Instant)>;
+type DnsCache = Cache<String, (Bytes, Instant)>;
 
 #[derive(Clone)]
 struct DynamicResolver {
@@ -350,7 +350,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let exclude_domain = exclude_domain.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
-                            if extract_domain(&data) == "unknown" {
+                            if extract_dns_info(&data).0 == "unknown" {
                                 stats.malformed.fetch_add(1, Ordering::Relaxed);
                             }
                             if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
@@ -801,7 +801,7 @@ async fn handle_tcp_query(
     stream.read_exact(&mut data).await?;
     let data = Bytes::from(data);
 
-    if extract_domain(&data) == "unknown" {
+    if extract_dns_info(&data).0 == "unknown" {
         stats.malformed.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -819,30 +819,47 @@ async fn handle_tcp_query(
     }
 }
 
-fn extract_domain(data: &[u8]) -> String {
+fn extract_dns_info(data: &[u8]) -> (String, String) {
     if let Ok(msg) = Message::from_vec(data) {
         if let Some(query) = msg.queries().first() {
             let name = query.name().to_string();
-            return if name.ends_with('.') && name.len() > 1 {
+            let domain = if name.ends_with('.') && name.len() > 1 {
                 name[..name.len() - 1].to_string()
             } else {
-                name
+                name.clone()
             };
+            
+            let qtype = query.query_type();
+            let qclass = query.query_class();
+            // Stable cache key: name|type|class
+            let key = format!("{}:{}:{}", name.to_lowercase(), qtype, qclass);
+            
+            return (domain, key);
         }
     }
 
-    if data.len() <= 12 { return "unknown".to_string(); }
-    let mut d = String::new();
-    let mut i = 12;
-    while i < data.len() && data[i] != 0 {
-        let len = data[i] as usize;
-        i += 1;
-        if i + len > data.len() { break; }
-        if !d.is_empty() { d.push('.'); }
-        d.push_str(&String::from_utf8_lossy(&data[i..i+len]));
-        i += len;
+    let mut domain = "unknown".to_string();
+    if data.len() > 12 {
+        let mut d = String::new();
+        let mut i = 12;
+        while i < data.len() && data[i] != 0 {
+            let len = data[i] as usize;
+            i += 1;
+            if i + len > data.len() { break; }
+            if !d.is_empty() { d.push('.'); }
+            d.push_str(&String::from_utf8_lossy(&data[i..i+len]));
+            i += len;
+        }
+        if !d.is_empty() { domain = d; }
     }
-    if d.is_empty() { "unknown".to_string() } else { d }
+
+    let key = if data.len() >= 2 {
+        format!("{:02x?}", &data[2..])
+    } else {
+        format!("{:02x?}", data)
+    };
+
+    (domain, key)
 }
 
 async fn forward_to_doh(
@@ -859,7 +876,7 @@ async fn forward_to_doh(
     }
 
     let original_id = [data[0], data[1]];
-    let domain = extract_domain(&data);
+    let (domain, cache_key) = extract_dns_info(&data);
     let should_cache = if let Some(ref exclude) = exclude_domain {
         !domain.eq_ignore_ascii_case(exclude)
     } else {
@@ -868,7 +885,6 @@ async fn forward_to_doh(
     
     // 1. Check Cache
     if should_cache {
-        let cache_key = data.slice(2..);
         if let Some((cached_resp, expiry)) = cache.get(&cache_key).await {
             if Instant::now() < expiry {
                 let remaining = expiry.duration_since(Instant::now()).as_secs();
@@ -927,7 +943,6 @@ async fn forward_to_doh(
                 
                 // 2. Update Cache with TTL extraction
                 if should_cache && bytes.len() > 2 {
-                    let cache_key = data.slice(2..);
                     let mut ttl = cache_ttl_default; // Default TTL from config
                     if let Ok(msg) = Message::from_vec(&bytes) {
                         ttl = msg.answers().iter().map(|a| a.ttl()).min().unwrap_or(cache_ttl_default as u32).into();
@@ -935,7 +950,7 @@ async fn forward_to_doh(
                         if ttl > 3600 { ttl = 3600; }
                     }
                     let expiry = Instant::now() + Duration::from_secs(ttl);
-                    cache.insert(cache_key.clone(), (bytes.clone(), expiry)).await;
+                    cache.insert(cache_key, (bytes.clone(), expiry)).await;
                 }
 
                 // Restore original ID in the response
