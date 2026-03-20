@@ -6,6 +6,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
     - uses: actions/checkout@v4
@@ -15,26 +17,42 @@ jobs:
       with:
         java-version: '21'
         distribution: 'temurin'
-        cache: gradle
+        cache: gradle             # was missing — saves ~1 min re-downloading deps
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: aarch64-linux-android
 
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@main
+
     - name: Install cargo-ndk
-      run: cargo install cargo-ndk
+      run: cargo binstall --no-confirm cargo-ndk
+
+    # Cache Rust registry and build artefacts — avoids full recompile every run
+    - name: Cache Rust
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: rust-${{ runner.os }}-
 
     - name: Set up Android NDK
       uses: nttld/setup-ndk@v1
       with:
-        ndk-version: r27c
+        ndk-version: r29          # matches local NDK 29.0.14206865
+        add-to-path: true
 
     - name: Build Rust Core
+      # RUSTFLAGS is intentionally NOT set here — build_android.sh owns it
       run: |
         export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
         chmod +x build_android.sh
-        ./build_android.sh
+        ./build_android.sh -d    # debug build for CI
 
     - name: Build Android App
       run: |

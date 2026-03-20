@@ -1,14 +1,29 @@
 name: Security Audit
 
 on:
+  push:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+  schedule:
+    - cron: '0 6 * * 1'   # every Monday 06:00 UTC
   workflow_dispatch:
 
 jobs:
   audit:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo audit
-        run: cargo audit
+    - uses: actions/checkout@v4
+
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@main
+
+    - name: Install cargo-audit
+      run: cargo binstall --no-confirm cargo-audit
+
+    - name: Run cargo audit
+      run: cargo audit
