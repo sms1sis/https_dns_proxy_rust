@@ -31,6 +31,8 @@ jobs:
 
     - name: Install cargo-ndk
       run: cargo binstall --no-confirm cargo-ndk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     # Cache Rust registry and build artefacts — avoids full recompile every run
     - name: Cache Rust
