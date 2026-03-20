@@ -1,46 +1,86 @@
 [package]
 name = "https_dns_proxy_rust"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 authors = ["sms1sis <sadimsajid2004@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/sms1sis/https_dns_proxy_rust"
-categories = ["os::android", "network-programming", "external-ffi-bindings"]
+categories = ["network-programming", "external-ffi-bindings"]
 keywords = ["dns", "doh", "android", "jni", "proxy"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
+# jni   → Android .so  (JNI bridge + android_logger + rustls platform verifier)
+# cli   → Desktop binary (clap, tracing, nix privilege drop, daemonize)
+# http3 → Opt-in QUIC/HTTP3 (large binary, also requires --cfg reqwest_unstable)
 [features]
 default = []
-jni = ["dep:jni", "dep:tokio-util"]
+jni   = ["dep:jni", "dep:tokio-util", "dep:android_logger", "dep:rustls-platform-verifier"]
+cli   = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:nix", "dep:daemonize"]
+http3 = ["reqwest/http3"]
 
 [profile.release]
-opt-level = 3
-lto = true
+opt-level     = 3
+lto           = true
 codegen-units = 1
-panic = "abort"
-strip = true
+panic         = "abort"
+strip         = true
 
+# ── Core (always compiled) ────────────────────────────────────────────────────
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12.5", features = ["rustls-tls-webpki-roots", "socks", "http2", "http3"], default-features = false }
-
-clap = { version = "4", features = ["derive"] }
-tracing = { version = "0.1.44", features = ["log"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tracing-appender = "0.2"
-anyhow = "1"
-bytes = "1"
-futures-util = "0.3"
+tokio            = { version = "1",      features = ["full"] }
+anyhow           = "1"
+bytes            = "1"
+socket2          = { version = "0.6.3",  features = ["all"] }
 hickory-resolver = "0.25"
-nix = { version = "0.31.1", features = ["user", "fs"] }
-daemonize = "0.5"
-chrono = "0.4"
-android_logger = "0.15.1"
-moka = { version = "0.12", features = ["future"] }
-socket2 = { version = "0.6.3", features = ["all"] }
-jni = { version = "0.21", optional = true }
-tokio-util = { version = "0.7", optional = true }
-log = "0.4"
-rustls-platform-verifier = { version = "0.6.2", features = ["jni"] }
+chrono           = { version = "0.4",    default-features = false, features = ["clock", "std"] }
+log              = "0.4"
+
+[dependencies.reqwest]
+version          = "0.12.5"
+default-features = false
+features         = ["rustls-tls-webpki-roots", "socks", "http2"]
+
+# ── JNI / Android (--features jni) ───────────────────────────────────────────
+[dependencies.jni]
+version  = "0.21"
+optional = true
+
+[dependencies.tokio-util]
+version  = "0.7"
+optional = true
+
+[dependencies.android_logger]
+version  = "0.15.1"
+optional = true
+
+[dependencies.rustls-platform-verifier]
+version  = "0.6.2"
+features = ["jni"]
+optional = true
+
+# ── CLI / Desktop (--features cli) ───────────────────────────────────────────
+[dependencies.clap]
+version  = "4"
+features = ["derive"]
+optional = true
+
+[dependencies.tracing]
+version  = "0.1.44"
+features = ["log"]
+optional = true
+
+[dependencies.tracing-subscriber]
+version  = "0.3.23"
+features = ["env-filter"]
+optional = true
+
+[dependencies.nix]
+version  = "0.31.1"
+features = ["user", "fs"]
+optional = true
+
+[dependencies.daemonize]
+version  = "0.5"
+optional = true

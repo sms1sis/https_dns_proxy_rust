@@ -9,8 +9,10 @@
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 *   **Package Name:** `io.github.SafeDNS`
 
-## Recent Android Updates (v0.3.2)
+## Recent Android Updates (v0.6.0)
 
+*   **Cache Pulse Exclusion:** Prevented the latency pulse (heartbeat) domain from being cached, ensuring real-time latency measurements.
+*   **Heartbeat Reliability:** Fixed a bug where the heartbeat loop would persist in the background even after being disabled in the UI.
 *   **Rebranding:** Fully rebranded as **SafeDNS** with a new package identity and polished UI.
 *   **Persistent HTTP Connections:** Implemented a `DynamicResolver` to maintain a single `reqwest::Client` with a shared connection pool, eliminating latency spikes during bootstrap refreshes.
 *   **Smart DNS Caching:** Added TTL extraction from DNS response headers (via `hickory-proto`) to ensure cache freshness and protocol compliance.
