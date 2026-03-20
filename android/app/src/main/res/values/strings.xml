@@ -103,4 +103,9 @@
     
     <!-- Quick Settings -->
     <string name="tile_label">SafeDNS</string>
+
+    <!-- Add these 3 entries to your res/values/strings.xml -->
+    <string name="cache_hit_rate">Cache Hit Rate</string>
+    <string name="cache_misses">Cache Misses</string>
+    <string name="cache_stored">Stored</string>
 </resources>

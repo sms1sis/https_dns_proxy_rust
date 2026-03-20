@@ -37,9 +37,17 @@ fun StatsScreen(stats: IntArray) {
     val cacheHits = stats.getOrElse(5) { 0 }
     val errors = stats.getOrElse(6) { 0 }
     val avgLat = stats.getOrElse(7) { 0 }
+    val cacheSize = stats.getOrElse(8) { 0 }
+    val cacheMisses = stats.getOrElse(9) { 0 }
 
     val successRate = if (total > 0) {
         ((total - errors).toFloat() / total.toFloat() * 100).toInt().coerceIn(0, 100)
+    } else null
+
+    // Cache hit rate: hits / (hits + misses) * 100
+    val totalCacheLookups = cacheHits + cacheMisses
+    val hitRate = if (totalCacheLookups > 0) {
+        (cacheHits.toFloat() / totalCacheLookups.toFloat() * 100).toInt().coerceIn(0, 100)
     } else null
 
     Column(
@@ -119,6 +127,53 @@ fun StatsScreen(stats: IntArray) {
             }
         }
 
+        Spacer(Modifier.height(16.dp))
+
+        // Cache Hit Rate Card — same style as success rate but for cache efficiency
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(32.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 32.dp, vertical = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    stringResource(R.string.cache_hit_rate),
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Text(
+                    if (hitRate != null) "$hitRate%" else "--%",
+                    style = MaterialTheme.typography.displayMedium,
+                    fontWeight = FontWeight.Black,
+                    color = if (hitRate != null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline
+                )
+                LinearProgressIndicator(
+                    progress = { (hitRate ?: 0) / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp)
+                        .clip(RoundedCornerShape(8.dp)),
+                    color = if (hitRate != null) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                    trackColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f)
+                )
+                // Hits / Misses / Stored breakdown below the bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    CacheStatLabel(label = stringResource(R.string.cache_hits),   value = cacheHits.toString())
+                    CacheStatLabel(label = stringResource(R.string.cache_misses), value = cacheMisses.toString())
+                    CacheStatLabel(label = stringResource(R.string.cache_stored), value = cacheSize.toString())
+                }
+            }
+        }
+
         Spacer(Modifier.height(32.dp))
 
         // --- Local Traffic Section ---
@@ -183,6 +238,21 @@ fun StatsScreen(stats: IntArray) {
                 icon = Icons.Default.OfflineBolt,
                 label = stringResource(R.string.cache_hits),
                 value = cacheHits.toString()
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.CloudOff,
+                label = stringResource(R.string.cache_misses),
+                value = cacheMisses.toString()
+            )
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.Storage,
+                label = stringResource(R.string.cache_stored),
+                value = cacheSize.toString()
             )
         }
         Spacer(Modifier.height(12.dp))
@@ -256,5 +326,24 @@ fun StatCard(
                 color = MaterialTheme.colorScheme.outline
             )
         }
+    }
+}
+
+/// Small inline label+value used inside the cache hit rate card breakdown row.
+@Composable
+private fun CacheStatLabel(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSecondaryContainer
+        )
+        Text(
+            text = label.uppercase(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
+            letterSpacing = 0.5.sp
+        )
     }
 }

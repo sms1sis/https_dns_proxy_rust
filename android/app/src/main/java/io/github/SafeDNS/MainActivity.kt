@@ -125,11 +125,11 @@ class MainActivity : ComponentActivity() {
         val context = LocalContext.current
         val prefs = remember { context.getSharedPreferences("settings", MODE_PRIVATE) }
         
-        var isRunning by remember { mutableStateOf(ProxyService.isProxyRunning) }
+        var isRunning by remember { mutableStateOf(ProxyService.isVpnActive) }
         var currentTab by remember { mutableStateOf(0) }
         var latency by remember { mutableStateOf(0) }
         var logs by remember { mutableStateOf(emptyArray<String>()) }
-        var stats by remember { mutableStateOf(intArrayOf(0, 0, 0)) }
+        var stats by remember { mutableStateOf(IntArray(10)) }
         var showAppSelection by remember { mutableStateOf(false) }
         var excludedApps by remember { mutableStateOf(prefs.getStringSet("excluded_apps", emptySet()) ?: emptySet()) }
         
@@ -232,7 +232,7 @@ class MainActivity : ComponentActivity() {
             }
             
             while (true) {
-                isRunning = ProxyService.isProxyRunning
+                isRunning = ProxyService.isVpnActive
                 if (isRunning) {
                     val newLat = ProxyService.getLatency()
                     if (newLat > 0 && newLat != latency) {
@@ -513,7 +513,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: String, tcpLimit: String, pollInterval: String, useHttp3: Boolean, heartbeatEnabled: Boolean, heartbeatDomain: String, heartbeatInterval: String) {
+    private fun startProxyService(resolverUrl: String, listenPort: String, bootstrapDns: String, allowIpv6: Boolean, cacheTtl: String, tcpLimit: String, pollInterval: String, useHttp3: Boolean, heartbeatEnabled: Boolean, heartbeatDomain: String, heartbeatInterval: String, excludeSuffixes: String = "every1dns.net") {
         val intent = Intent(this, ProxyService::class.java).apply {
             putExtra("resolverUrl", resolverUrl)
             putExtra("listenPort", listenPort.toIntOrNull() ?: 5053)
@@ -526,6 +526,7 @@ class MainActivity : ComponentActivity() {
             putExtra("heartbeatEnabled", heartbeatEnabled)
             putExtra("heartbeatDomain", heartbeatDomain)
             putExtra("heartbeatInterval", heartbeatInterval.toLongOrNull() ?: 10L)
+            putExtra("excludeSuffixes", excludeSuffixes)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
         else startService(intent)

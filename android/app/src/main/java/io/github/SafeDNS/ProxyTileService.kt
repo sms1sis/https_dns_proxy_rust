@@ -13,7 +13,7 @@ class ProxyTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        if (ProxyService.isProxyRunning) {
+        if (ProxyService.isProxyRunning()) {
             val intent = Intent(this, ProxyService::class.java).apply {
                 action = "STOP"
             }
@@ -33,7 +33,7 @@ class ProxyTileService : TileService() {
 
     private fun updateTile() {
         val tile = qsTile ?: return
-        val isRunning = ProxyService.isProxyRunning
+        val isRunning = ProxyService.isProxyRunning()
         
         tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.label = getString(R.string.tile_label)
