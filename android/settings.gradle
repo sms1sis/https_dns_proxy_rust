@@ -8,27 +8,49 @@ pluginManagement {
     }
 }
 
+// Locates the rustls-platform-verifier AAR embedded in the Cargo registry.
+// Must use --manifest-path so cargo knows where to look regardless of CWD.
+// settings.gradle lives at android/settings.gradle, so rootDir.parent = repo root.
 def getRustlsPlatformVerifierPath() {
+    def cargoToml = new File(rootDir.parentFile, "Cargo.toml").absolutePath
+
     try {
-        def process = ["cargo", "metadata", "--format-version", "1", "--filter-platform", "aarch64-linux-android"].execute()
+        def cmd = ["cargo", "metadata",
+                   "--format-version", "1",
+                   "--features", "jni",
+                   "--filter-platform", "aarch64-linux-android",
+                   "--manifest-path", cargoToml]
+
+        def process = cmd.execute()
         def stdout = new StringBuffer()
         def stderr = new StringBuffer()
         process.waitForProcessOutput(stdout, stderr)
-        
+
         if (process.exitValue() != 0) {
-            println "Cargo metadata failed: $stderr"
-            return null
+            throw new GradleException("cargo metadata failed:\n${stderr}")
         }
 
         def json = new JsonSlurper().parseText(stdout.toString())
-        def pkg = json.packages.find { it.name == 'rustls-platform-verifier-android' }
-        if (pkg) {
-            return new File(pkg.manifest_path).parentFile.absolutePath + "/maven"
+        def pkg = json.packages.find { it.name == "rustls-platform-verifier-android" }
+        if (!pkg) {
+            throw new GradleException(
+                "rustls-platform-verifier-android not found in cargo metadata.\n" +
+                "Run: cargo fetch --target aarch64-linux-android\n" +
+                "from: ${rootDir.parentFile.absolutePath}"
+            )
         }
+
+        def mavenDir = new File(file(pkg.manifest_path).parentFile, "maven")
+        if (!mavenDir.exists()) {
+            throw new GradleException("Maven dir not found at: ${mavenDir.absolutePath}")
+        }
+        return mavenDir.absolutePath
+
+    } catch (GradleException e) {
+        throw e
     } catch (Exception e) {
-        println "Failed to resolve rustls-platform-verifier path: $e"
+        throw new GradleException("Failed to resolve rustls-platform-verifier: ${e.message}", e)
     }
-    return null
 }
 
 dependencyResolutionManagement {
@@ -36,13 +58,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        def localMaven = getRustlsPlatformVerifierPath()
-        if (localMaven) {
-            maven {
-                url = localMaven
-            }
+        maven {
+            url = getRustlsPlatformVerifierPath()
         }
     }
 }
+
 rootProject.name = "https_dns_proxy_rust"
 include ':app'
