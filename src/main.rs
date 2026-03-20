@@ -1,15 +1,19 @@
 use clap::Parser;
 use anyhow::{Result, Context};
 use std::sync::Arc;
+use https_dns_proxy_rust::{Config, Stats, run_proxy};
+
+// CLI-only imports
+#[cfg(feature = "cli")]
 use tracing::Level;
+#[cfg(not(target_os = "android"))]
 use tracing_subscriber::prelude::*;
-// Only import these on non-Android platforms
+#[cfg(not(target_os = "android"))]
+use std::fs::File;
 #[cfg(not(target_os = "android"))]
 use nix::unistd::{User, Group, setuid, setgid};
 #[cfg(not(target_os = "android"))]
 use daemonize::Daemonize;
-use std::fs::File;
-use https_dns_proxy_rust::{Config, Stats, run_proxy};
 
 #[derive(Parser, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -70,41 +74,48 @@ struct Args {
     #[arg(short = 'C', long)]
     ca_path: Option<String>,
 
-    /// Daemonize
-    #[arg(short = 'd', long)]
-    daemonize: bool,
-
-    /// Optional user to drop to if launched as root
-    #[arg(short = 'u', long)]
-    user: Option<String>,
-
-    /// Optional group to drop to if launched as root
-    #[arg(short = 'g', long)]
-    group: Option<String>,
-
-    /// Increase logging verbosity
-    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
-
-    /// Path to file to log to
-    #[arg(short = 'l', long)]
-    logfile: Option<String>,
-
-    /// Optional statistic printout interval
+    /// Optional statistic printout interval (seconds, 0 = disabled)
     #[arg(short = 's', long, default_value_t = 0)]
     statistic_interval: u64,
 
-    /// Cache TTL in seconds (default 60)
+    /// Cache TTL in seconds
     #[arg(long, default_value_t = 60)]
     cache_ttl: u64,
 
-    /// Optional domain to exclude from cache
-    #[arg(short = 'e', long)]
-    exclude_domain: Option<String>,
+    /// Comma-separated domain suffixes to exclude from cache (e.g. "every1dns.net,local")
+    /// Suffix match: "every1dns.net" also excludes "uuid.sub.every1dns.net"
+    #[arg(short = 'e', long, default_value = "")]
+    exclude_suffixes: String,
 
-    /// Print versions and exit
+    /// Print version and exit
     #[arg(short = 'P', long)]
     print_version: bool,
+
+    // ── Desktop / server only ────────────────────────────────────────────────
+    /// Daemonize the process
+    #[cfg(not(target_os = "android"))]
+    #[arg(short = 'd', long)]
+    daemonize: bool,
+
+    /// Optional user to drop privileges to after binding
+    #[cfg(not(target_os = "android"))]
+    #[arg(short = 'u', long)]
+    user: Option<String>,
+
+    /// Optional group to drop privileges to after binding
+    #[cfg(not(target_os = "android"))]
+    #[arg(short = 'g', long)]
+    group: Option<String>,
+
+    /// Increase logging verbosity (-v debug, -vv trace)
+    #[cfg(not(target_os = "android"))]
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Path to log file (defaults to stderr)
+    #[cfg(not(target_os = "android"))]
+    #[arg(short = 'l', long)]
+    logfile: Option<String>,
 }
 
 #[tokio::main]
@@ -116,6 +127,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Logging: only set up the tracing subscriber on non-Android targets.
+    // On Android, android_logger is initialised by the JNI initLogger call.
+    #[cfg(not(target_os = "android"))]
     setup_logging(args.verbose, &args.logfile);
 
     #[cfg(not(target_os = "android"))]
@@ -126,7 +140,9 @@ async fn main() -> Result<()> {
         daemonize.start().context("Failed to daemonize")?;
     }
 
-    // Drop privileges if requested (Android apps usually don't need this via nix)
+    // Drop privileges if requested — only available on non-Android targets
+    // because it depends on the `nix` crate bindings.
+    #[cfg(not(target_os = "android"))]
     if args.user.is_some() || args.group.is_some() {
         drop_privileges(&args.user, &args.group)?;
     }
@@ -149,17 +165,26 @@ async fn main() -> Result<()> {
         ca_path: args.ca_path,
         statistic_interval: args.statistic_interval,
         cache_ttl: args.cache_ttl,
-        exclude_domain: args.exclude_domain,
+        exclude_suffixes: args.exclude_suffixes
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
     };
 
     let stats = Arc::new(Stats::new());
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    // Keep _shutdown_tx alive for the entire duration of run_proxy.
+    // Dropping it immediately (e.g. with `let (_, rx) = ...`) would close
+    // the channel at once, causing the proxy to shut down before it starts.
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     run_proxy(config, stats, shutdown_rx).await?;
 
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 fn setup_logging(verbosity: u8, logfile: &Option<String>) {
     let level = match verbosity {
         0 => Level::INFO,
@@ -187,6 +212,7 @@ fn setup_logging(verbosity: u8, logfile: &Option<String>) {
     registry.with(layer).init();
 }
 
+#[cfg(not(target_os = "android"))]
 fn drop_privileges(user_name: &Option<String>, group_name: &Option<String>) -> Result<()> {
     if let Some(group) = group_name {
         let g = Group::from_name(group)?
@@ -200,3 +226,4 @@ fn drop_privileges(user_name: &Option<String>, group_name: &Option<String>) -> R
     }
     Ok(())
 }
+

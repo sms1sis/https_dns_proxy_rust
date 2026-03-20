@@ -5,14 +5,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url, Proxy};
 use reqwest::dns::{Resolve, Resolving, Name, Addrs};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, Semaphore, mpsc};
+use tokio::sync::{RwLock, Semaphore, mpsc, broadcast};
 
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
 use bytes::Bytes;
-use moka::future::Cache;
+// No moka — plain std HashMap with manual TTL via Instant.
+// Completely avoids moka's background-thread eviction issues on Android.
 use jni::JavaVM;
 use hickory_resolver::proto::op::Message;
 use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy};
@@ -27,6 +28,7 @@ pub struct Stats {
     pub queries_tcp: AtomicUsize,
     pub queries_https: AtomicUsize,
     pub cache_hits: AtomicUsize,
+    pub cache_misses: AtomicUsize,
     pub malformed: AtomicUsize,
     pub errors: AtomicUsize,
     pub total_latency: AtomicUsize,
@@ -54,47 +56,49 @@ static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|
     tx
 });
 
-struct NativeLog {
-    level: String,
-    msg: String,
+enum NativeLog {
+    Log { level: String, msg: String },
+    Shutdown,
 }
 
 static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock::new(|| {
     let (tx, mut rx) = mpsc::unbounded_channel::<NativeLog>();
-    
+
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             while let Some(log) = rx.recv().await {
-                match log.level.as_str() {
-                    "ERROR" => log::error!(target: "SafeDNS-Native", "{}", log.msg),
-                    "WARN" => log::warn!(target: "SafeDNS-Native", "{}", log.msg),
-                    "INFO" => log::info!(target: "SafeDNS-Native", "{}", log.msg),
-                    _ => log::debug!(target: "SafeDNS-Native", "{}", log.msg),
+                let (level, msg) = match log {
+                    NativeLog::Shutdown => break,
+                    NativeLog::Log { level, msg } => (level, msg),
+                };
+
+                // Emit to Android logcat first
+                match level.as_str() {
+                    "ERROR" => log::error!(target: "SafeDNS-Native", "{}", msg),
+                    "WARN"  => log::warn! (target: "SafeDNS-Native", "{}", msg),
+                    "INFO"  => log::info! (target: "SafeDNS-Native", "{}", msg),
+                    _       => log::debug!(target: "SafeDNS-Native", "{}", msg),
                 }
 
-                if let Ok(jvm_lock) = JVM.read() {
-                    if let Some(jvm) = jvm_lock.as_ref() {
-                        if let Ok(class_lock) = PROXY_SERVICE_CLASS.read() {
-                            if let Some(class_ref) = class_lock.as_ref() {
-                                if let Ok(mut env) = jvm.attach_current_thread() {
-                                    if let Ok(level_j) = env.new_string(&log.level) {
-                                        if let Ok(tag_j) = env.new_string("SafeDNS-Native") {
-                                            if let Ok(msg_j) = env.new_string(&log.msg) {
-                                                let _ = env.call_static_method(
-                                                    class_ref,
-                                                    "nativeLog",
-                                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                                                    &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Forward to Kotlin via JNI — flat closure, errors short-circuit cleanly.
+                let _ = (|| -> Option<()> {
+                    let jvm_lock   = JVM.read().ok()?;
+                    let jvm        = jvm_lock.as_ref()?;
+                    let class_lock = PROXY_SERVICE_CLASS.read().ok()?;
+                    let class_ref  = class_lock.as_ref()?;
+                    let mut env    = jvm.attach_current_thread().ok()?;
+                    let level_j    = env.new_string(&level).ok()?;
+                    let tag_j      = env.new_string("SafeDNS-Native").ok()?;
+                    let msg_j      = env.new_string(&msg).ok()?;
+                    env.call_static_method(
+                        class_ref,
+                        "nativeLog",
+                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                        &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                    ).ok()?;
+                    Some(())
+                })();
             }
         });
     });
@@ -108,10 +112,16 @@ fn native_log(level: &str, msg: &str) {
             _ => return,
         }
     }
-    let _ = NATIVE_LOG_SENDER.send(NativeLog {
+    let _ = NATIVE_LOG_SENDER.send(NativeLog::Log {
         level: level.to_string(),
         msg: msg.to_string(),
     });
+}
+
+/// Flush and shut down the native log thread cleanly.
+/// Call this from stopProxy() to avoid leaking the thread.
+fn shutdown_native_log() {
+    let _ = NATIVE_LOG_SENDER.send(NativeLog::Shutdown);
 }
 
 #[cfg(feature = "jni")]
@@ -136,6 +146,7 @@ impl Stats {
             queries_tcp: AtomicUsize::new(0),
             queries_https: AtomicUsize::new(0),
             cache_hits: AtomicUsize::new(0),
+            cache_misses: AtomicUsize::new(0),
             malformed: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
             total_latency: AtomicUsize::new(0),
@@ -163,10 +174,134 @@ pub struct Config {
     pub ca_path: Option<String>,
     pub statistic_interval: u64,
     pub cache_ttl: u64,
-    pub exclude_domain: Option<String>,
+    /// Domains matching any of these suffixes are never cached.
+    /// Suffix match: "every1dns.net" blocks "uuid.sub.every1dns.net" too.
+    /// Pass an empty Vec to disable exclusions entirely.
+    pub exclude_suffixes: Vec<String>,
 }
 
-type DnsCache = Cache<String, (Bytes, Instant)>;
+/// A single cached DNS response with its expiry deadline.
+#[derive(Clone)]
+struct DnsCacheEntry {
+    bytes:   Bytes,
+    expires: Instant,
+}
+
+/// Sharded DNS cache: 16 independent buckets, each with its own Mutex.
+///
+/// Sharding reduces lock contention ~16x under concurrent query load —
+/// tasks hashing to different shards never block each other.
+/// TTL is enforced lazily on get(); expired entries are swept on insert().
+#[derive(Clone)]
+struct DnsCache {
+    shards:          Arc<[Mutex<HashMap<String, DnsCacheEntry>>; 16]>,
+    max_per_shard:   usize,
+}
+
+impl DnsCache {
+    fn new(max_total: usize) -> Self {
+        // Initialise 16 empty shards via array::from_fn
+        let shards = std::array::from_fn(|_| Mutex::new(HashMap::new()));
+        Self {
+            shards: Arc::new(shards),
+            max_per_shard: (max_total / 16).max(1),
+        }
+    }
+
+    /// FNV-1a hash of the key, bottom 4 bits → shard index 0-15.
+    #[inline]
+    fn shard(key: &str) -> usize {
+        key.bytes()
+            .fold(0xcbf29ce484222325u64, |h, b| {
+                (h ^ b as u64).wrapping_mul(0x100000001b3)
+            }) as usize & 0xF
+    }
+
+    fn insert(&self, key: String, bytes: Bytes, ttl_secs: u64) {
+        let expires = Instant::now() + Duration::from_secs(ttl_secs);
+        let mut shard = self.shards[Self::shard(&key)].lock().unwrap();
+        let now = Instant::now();
+        shard.retain(|_, v| v.expires > now);
+        if shard.len() >= self.max_per_shard {
+            if let Some(oldest) = shard.iter()
+                .min_by_key(|(_, v)| v.expires)
+                .map(|(k, _)| k.clone())
+            {
+                shard.remove(&oldest);
+            }
+        }
+        shard.insert(key, DnsCacheEntry { bytes, expires });
+    }
+
+    fn get(&self, key: &str) -> Option<Bytes> {
+        let shard = self.shards[Self::shard(key)].lock().unwrap();
+        shard.get(key).and_then(|e| {
+            if e.expires > Instant::now() { Some(e.bytes.clone()) } else { None }
+        })
+    }
+
+    fn entry_count(&self) -> usize {
+        let now = Instant::now();
+        self.shards.iter()
+            .map(|s| s.lock().unwrap().values().filter(|v| v.expires > now).count())
+            .sum()
+    }
+
+    fn invalidate_all(&self) {
+        for shard in self.shards.iter() {
+            shard.lock().unwrap().clear();
+        }
+    }
+}
+
+/// In-flight deduplication map.
+///
+/// When two concurrent queries arrive for the same cache key before either
+/// has completed (the classic A + AAAA stampede), only the FIRST spawns a
+/// real DoH fetch. Every subsequent waiter subscribes to a broadcast channel
+/// and receives the response bytes the moment the first fetch completes —
+/// zero extra DoH requests, zero extra latency for the waiters.
+///
+/// Layout:  key → broadcast::Sender<Option<Bytes>>
+///   • `Some(bytes)` = fetch succeeded, here are the (ID-zeroed) response bytes
+///   • `None`        = fetch failed; waiter should fall through and retry itself
+#[derive(Clone)]
+struct InFlight {
+    inner: Arc<Mutex<HashMap<String, broadcast::Sender<Option<Bytes>>>>>,
+}
+
+impl InFlight {
+    fn new() -> Self {
+        Self { inner: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// Try to become the "owner" of a fetch for `key`.
+    ///
+    /// Returns:
+    ///   `Ok(tx)`  — caller is the owner; it must fetch and call `complete(key, result)`.
+    ///   `Err(rx)` — another task is already fetching; caller should `rx.await` for result.
+    fn register(&self, key: &str) -> Result<broadcast::Sender<Option<Bytes>>, broadcast::Receiver<Option<Bytes>>> {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(tx) = map.get(key) {
+            // Already in-flight — subscribe and wait
+            Err(tx.subscribe())
+        } else {
+            // We are the owner — create channel, insert sender
+            let (tx, _) = broadcast::channel(1);
+            map.insert(key.to_string(), tx.clone());
+            Ok(tx)
+        }
+    }
+
+    /// Called by the owner once the fetch is done (success or failure).
+    /// Broadcasts the result to all waiters and removes the key.
+    fn complete(&self, key: &str, result: Option<Bytes>) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(tx) = map.remove(key) {
+            let _ = tx.send(result);
+        }
+    }
+}
 
 #[derive(Clone)]
 struct DynamicResolver {
@@ -295,10 +430,13 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let client = create_client(&config, dynamic_resolver.clone())?;
     let resolver_url_str = Arc::new(config.resolver_url.clone());
     
-    // DNS Cache: 2048 entries
-    let cache: DnsCache = Cache::builder()
-        .max_capacity(2048)
-        .build();
+    // DNS Cache: up to 2048 entries, sharded HashMap with manual TTL.
+    // No moka background thread — works reliably on Android.
+    let cache = DnsCache::new(2048);
+    // In-flight dedup: concurrent identical queries share one DoH fetch
+    let in_flight = InFlight::new();
+    // Wrap exclude_suffixes in Arc so it can be cheaply cloned into every task
+    let exclude_suffixes = Arc::new(config.exclude_suffixes.clone());
 
     #[cfg(feature = "jni")]
     {
@@ -334,8 +472,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         let resolver_url = resolver_url_str.clone();
         let stats = stats.clone();
         let cache = cache.clone();
+        let in_flight = in_flight.clone();
         let cache_ttl = config.cache_ttl;
-        let exclude_domain = config.exclude_domain.clone();
+        let exclude_suffixes = exclude_suffixes.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
@@ -347,13 +486,11 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let resolver_url = resolver_url.clone();
                         let stats = stats.clone();
                         let cache = cache.clone();
-                        let exclude_domain = exclude_domain.clone();
+                        let in_flight = in_flight.clone();
+                        let exclude_suffixes = exclude_suffixes.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
-                            if extract_dns_info(&data).0 == "unknown" {
-                                stats.malformed.fetch_add(1, Ordering::Relaxed);
-                            }
-                            if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
+                            if let Err(e) = handle_udp_query(socket, client, resolver_url, data, peer, stats, cache, in_flight, cache_ttl, exclude_suffixes).await {
                                 native_log("DEBUG", &format!("UDP error from {}: {:#}", peer, e));
                             }
                         });
@@ -370,8 +507,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         let semaphore = tcp_semaphore.clone();
         let stats = stats.clone();
         let cache = cache.clone();
+        let in_flight = in_flight.clone();
         let cache_ttl = config.cache_ttl;
-        let exclude_domain = config.exclude_domain.clone();
+        let exclude_suffixes = exclude_suffixes.clone();
         tokio::spawn(async move {
             loop {
                 match tcp_listener.accept().await {
@@ -381,14 +519,12 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let permit = semaphore.clone().acquire_owned().await;
                         let stats = stats.clone();
                         let cache = cache.clone();
-                        let exclude_domain = exclude_domain.clone();
+                        let in_flight = in_flight.clone();
+                        let exclude_suffixes = exclude_suffixes.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
                             stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
-                            // We need to peek or read here, but handle_tcp_query already reads.
-                            // For simplicity, we just rely on handle_tcp_query errors or move extract_domain inside if needed.
-                            // Let's just track it inside handle_tcp_query for symmetry.
-                            if let Err(e) = handle_tcp_query(&mut stream, client, resolver_url, stats, cache, cache_ttl, exclude_domain).await {
+                            if let Err(e) = handle_tcp_query(&mut stream, client, resolver_url, stats, cache, in_flight, cache_ttl, exclude_suffixes).await {
                                 native_log("DEBUG", &format!("TCP error from {}: {}", peer, e));
                             }
                         });
@@ -397,6 +533,34 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                 }
             }
         })
+    };
+
+    // Optional periodic stats printout (CLI / debug use; disabled when interval == 0)
+    let stats_handle = if config.statistic_interval > 0 {
+        let stats = stats.clone();
+        let interval_secs = config.statistic_interval;
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                let udp   = stats.queries_udp.load(Ordering::Relaxed);
+                let tcp   = stats.queries_tcp.load(Ordering::Relaxed);
+                let https = stats.queries_https.load(Ordering::Relaxed);
+                let hits  = stats.cache_hits.load(Ordering::Relaxed);
+                let mal   = stats.malformed.load(Ordering::Relaxed);
+                let errs  = stats.errors.load(Ordering::Relaxed);
+                let count = stats.latency_count.load(Ordering::Relaxed);
+                let avg_lat = if count > 0 {
+                    stats.total_latency.load(Ordering::Relaxed) / count
+                } else { 0 };
+                native_log("INFO", &format!(
+                    "Stats: udp={} tcp={} https={} cache_hits={} malformed={} errors={} avg_latency={}ms",
+                    udp, tcp, https, hits, mal, errs, avg_lat
+                ));
+            }
+        }))
+    } else {
+        None
     };
 
     tokio::select! {
@@ -408,6 +572,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     udp_loop.abort();
     tcp_loop.abort();
     bootstrap_handle.abort();
+    if let Some(h) = stats_handle { h.abort(); }
     Ok(())
 }
 
@@ -416,12 +581,17 @@ pub mod jni_api {
     use super::*;
     use jni::JNIEnv;
     use jni::objects::{JClass, JObject, JString};
-    use jni::sys::jint;
+    use jni::sys::{jint, jboolean};
     use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
 
     static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap());
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
+
+    // Tracks whether run_proxy is actively running, so Kotlin can poll before
+    // restarting after a stopProxy() call (avoids port-already-in-use races).
+    static IS_PROXY_RUNNING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_initLogger(
@@ -472,16 +642,26 @@ pub mod jni_api {
         tcp_limit: jint,
         poll_interval: jni::sys::jlong,
         use_http3: jni::sys::jboolean,
-        exclude_domain: JString,
+        // Comma-separated list of domain suffixes to exclude from caching.
+        // e.g. "every1dns.net,local" blocks all subdomains of those suffixes.
+        // Pass "" to disable exclusions entirely.
+        exclude_suffixes: JString,
     ) -> jint {
         let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
         let resolver_url: String = env.get_string(&resolver_url).unwrap().into();
         let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
-        let exclude_domain: String = env.get_string(&exclude_domain).unwrap().into();
+        let exclude_raw: String = env.get_string(&exclude_suffixes).unwrap().into();
         let allow_ipv6 = allow_ipv6 != 0;
         let use_http3 = use_http3 != 0;
 
-        native_log("INFO", &format!("startProxy: addr={}, port={}, resolver={}", listen_addr, listen_port, resolver_url));
+        // Parse comma-separated suffixes, strip whitespace, drop empties
+        let exclude_suffixes: Vec<String> = exclude_raw
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        native_log("INFO", &format!("startProxy: addr={}, port={}, resolver={}, exclude={:?}", listen_addr, listen_port, resolver_url, exclude_suffixes));
 
         let config = Config {
             listen_addr,
@@ -501,7 +681,7 @@ pub mod jni_api {
             ca_path: None,
             statistic_interval: 0,
             cache_ttl: cache_ttl as u64,
-            exclude_domain: if exclude_domain.is_empty() { None } else { Some(exclude_domain) },
+            exclude_suffixes,
         };
 
         let token = CancellationToken::new();
@@ -528,9 +708,11 @@ pub mod jni_api {
                 let _ = tx.send(());
             });
 
+            IS_PROXY_RUNNING.store(true, Ordering::SeqCst);
             if let Err(e) = run_proxy(config_clone, stats_clone, rx).await {
                 native_log("ERROR", &format!("Proxy error: {}", e));
             }
+            IS_PROXY_RUNNING.store(false, Ordering::SeqCst);
         });
 
         0
@@ -549,35 +731,48 @@ pub mod jni_api {
             if let Some(cache) = &*GLOBAL_CACHE.read().await {
                 cache.entry_count()
             } else {
-                0
+                0usize
             }
         });
 
-        let mut values = [0i32; 8];
+        // Index layout (must match StatsScreen on the Kotlin side):
+        //   [0] udp queries
+        //   [1] tcp queries
+        //   [2] malformed queries
+        //   [3] total queries (udp + tcp)
+        //   [4] https (DoH) requests forwarded
+        //   [5] cache hits
+        //   [6] errors
+        //   [7] avg latency (ms)
+        //   [8] current cache entry count
+        //   [9] cache misses
+        let mut values = [0i32; 10];
         if let Some(stats) = stats_opt {
-            let udp = stats.queries_udp.load(Ordering::Relaxed);
-            let tcp = stats.queries_tcp.load(Ordering::Relaxed);
-            let hits = stats.cache_hits.load(Ordering::Relaxed);
-            let https = stats.queries_https.load(Ordering::Relaxed);
-            let errs = stats.errors.load(Ordering::Relaxed);
-            let t_lat = stats.total_latency.load(Ordering::Relaxed);
-            let count = stats.latency_count.load(Ordering::Relaxed);
+            let udp    = stats.queries_udp.load(Ordering::Relaxed);
+            let tcp    = stats.queries_tcp.load(Ordering::Relaxed);
+            let hits   = stats.cache_hits.load(Ordering::Relaxed);
+            let misses = stats.cache_misses.load(Ordering::Relaxed);
+            let https  = stats.queries_https.load(Ordering::Relaxed);
+            let errs   = stats.errors.load(Ordering::Relaxed);
+            let t_lat  = stats.total_latency.load(Ordering::Relaxed);
+            let count  = stats.latency_count.load(Ordering::Relaxed);
             let avg_lat = if count > 0 { (t_lat / count) as i32 } else { 0 };
 
-            native_log("DEBUG", &format!("JNI getStats: udp={}, tcp={}, hits={}, https={}, err={}, lat={}ms, cache_size={}", udp, tcp, hits, https, errs, avg_lat, cache_count));
+            native_log("DEBUG", &format!("JNI getStats: udp={}, tcp={}, hits={}, misses={}, https={}, err={}, lat={}ms, cache_size={}", udp, tcp, hits, misses, https, errs, avg_lat, cache_count));
 
             values[0] = udp as i32;
             values[1] = tcp as i32;
             values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
             values[3] = (udp + tcp) as i32;
-            
             values[4] = https as i32;
             values[5] = hits as i32;
             values[6] = errs as i32;
             values[7] = avg_lat;
+            values[8] = cache_count as i32;
+            values[9] = misses as i32;
         }
 
-        let array = env.new_int_array(8).unwrap();
+        let array = env.new_int_array(10).unwrap();
         env.set_int_array_region(&array, 0, &values).unwrap();
         array.into_raw()
     }
@@ -594,6 +789,7 @@ pub mod jni_api {
             stats.queries_tcp.store(0, Ordering::Relaxed);
             stats.queries_https.store(0, Ordering::Relaxed);
             stats.cache_hits.store(0, Ordering::Relaxed);
+            stats.cache_misses.store(0, Ordering::Relaxed);
             stats.malformed.store(0, Ordering::Relaxed);
             stats.errors.store(0, Ordering::Relaxed);
             stats.total_latency.store(0, Ordering::Relaxed);
@@ -621,16 +817,24 @@ pub mod jni_api {
     ) -> jni::sys::jobjectArray {
         let logs = QUERY_LOGS.lock().unwrap();
         let list: Vec<String> = logs.iter().cloned().collect();
-        
+
         let cls = env.find_class("java/lang/String").unwrap();
         let initial = env.new_string("").unwrap();
-        let array = env.new_object_array(list.len() as jni::sys::jsize, cls, &initial).unwrap();
-        
+        // In jni 0.22 new_object_array takes the initial element as impl Into<JObject<'_>>.
+        // We pass JObject::null() as the initial fill value and set each element below.
+        let array = env.new_object_array(
+            list.len() as jni::sys::jsize,
+            &cls,
+            jni::objects::JObject::null(),
+        ).unwrap();
+        drop(initial); // no longer needed
+
         for (i, log) in list.iter().enumerate() {
             let s = env.new_string(log).unwrap();
+            // set_object_array_element accepts impl AsRef<JObject> — JString derefs to JObject.
             env.set_object_array_element(&array, i as jni::sys::jsize, &s).unwrap();
         }
-        
+
         array.into_raw()
     }
 
@@ -652,6 +856,24 @@ pub mod jni_api {
         if let Some(token) = lock.take() {
             token.cancel();
         }
+        shutdown_native_log();
+    }
+
+    /// Returns true if run_proxy is still executing (i.e. not yet fully shut down).
+    /// Kotlin should poll this after stopProxy() before calling startProxy() again
+    /// to avoid binding the same port while the old instance is still releasing it.
+    ///
+    /// Kotlin usage:
+    ///   stopProxy()
+    ///   var waited = 0
+    ///   while (isProxyRunning() && waited < 3000) { delay(100); waited += 100 }
+    ///   startProxy(...)
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_isProxyRunning(
+        _env: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        IS_PROXY_RUNNING.load(Ordering::SeqCst) as jboolean
     }
 
     #[unsafe(no_mangle)]
@@ -784,10 +1006,11 @@ async fn handle_udp_query(
     peer: SocketAddr,
     stats: Arc<Stats>,
     cache: DnsCache,
+    in_flight: InFlight,
     cache_ttl_default: u64,
-    exclude_domain: Option<String>,
+    exclude_suffixes: Arc<Vec<String>>,
 ) -> Result<()> {
-    match forward_to_doh(client, resolver_url, data, stats.clone(), cache, cache_ttl_default, exclude_domain).await {
+    match forward_to_doh(client, resolver_url, data, stats.clone(), cache, in_flight, cache_ttl_default, exclude_suffixes).await {
         Ok(bytes) => {
             socket.send_to(&bytes, peer).await?;
             Ok(())
@@ -806,8 +1029,9 @@ async fn handle_tcp_query(
     resolver_url: Arc<String>,
     stats: Arc<Stats>,
     cache: DnsCache,
+    in_flight: InFlight,
     cache_ttl_default: u64,
-    exclude_domain: Option<String>,
+    exclude_suffixes: Arc<Vec<String>>,
 ) -> Result<()> {
     let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf).await?;
@@ -821,7 +1045,7 @@ async fn handle_tcp_query(
         stats.malformed.fetch_add(1, Ordering::Relaxed);
     }
 
-    match forward_to_doh(client, resolver_url, data, stats.clone(), cache, cache_ttl_default, exclude_domain).await {
+    match forward_to_doh(client, resolver_url, data, stats.clone(), cache, in_flight, cache_ttl_default, exclude_suffixes).await {
         Ok(bytes) => {
             let resp_len = (bytes.len() as u16).to_be_bytes();
             stream.write_all(&resp_len).await?;
@@ -835,26 +1059,37 @@ async fn handle_tcp_query(
     }
 }
 
+/// Parse a DNS query wire message and return `(display_domain, cache_key)`.
+///
+/// The cache key is always `"<lower-name>:<qtype>:<qclass>"` — derived from
+/// the question section only, never from the transaction ID or flag bytes,
+/// so repeated queries for the same name hit the same cache slot regardless
+/// of which client or flag combination sent them.
+///
+/// Falls back to a best-effort key built from the raw question bytes (hex)
+/// when the message cannot be parsed by hickory — still stable across calls
+/// for the same wire content.
 fn extract_dns_info(data: &[u8]) -> (String, String) {
     if let Ok(msg) = Message::from_vec(data) {
         if let Some(query) = msg.queries().first() {
             let name = query.name().to_string();
+            // Strip trailing dot for the human-readable domain display.
             let domain = if name.ends_with('.') && name.len() > 1 {
                 name[..name.len() - 1].to_string()
             } else {
                 name.clone()
             };
-            
-            let qtype = query.query_type();
-            let qclass = query.query_class();
-            // Stable cache key: name|type|class
-            let key = format!("{}:{}:{}", name.to_lowercase(), qtype, qclass);
-            
+            // Key always uses the dot-stripped, lowercased domain so that
+            // "google.com." and "google.com" (if they ever differ) hash to
+            // the same slot. Never includes the transaction ID or flags.
+            let key = format!("{}:{}:{}", domain.to_lowercase(), query.query_type(), query.query_class());
+            native_log("DEBUG", &format!("extract_dns_info: domain={} key={}", domain, key));
             return (domain, key);
         }
     }
 
-    let mut domain = "unknown".to_string();
+    // Fallback: parse domain name manually from wire format
+    let mut domain = String::from("unknown");
     if data.len() > 12 {
         let mut d = String::new();
         let mut i = 12;
@@ -863,19 +1098,95 @@ fn extract_dns_info(data: &[u8]) -> (String, String) {
             i += 1;
             if i + len > data.len() { break; }
             if !d.is_empty() { d.push('.'); }
-            d.push_str(&String::from_utf8_lossy(&data[i..i+len]));
+            d.push_str(&String::from_utf8_lossy(&data[i..i + len]));
             i += len;
         }
         if !d.is_empty() { domain = d; }
     }
 
-    let key = if data.len() >= 2 {
-        format!("{:02x?}", &data[2..])
+    // Fallback key: hex of question section bytes (bytes 12+), stable across
+    // repeated calls for the same packet content.
+    let key = if data.len() > 12 {
+        data[12..].iter().map(|b| format!("{:02x}", b)).collect::<String>()
     } else {
-        format!("{:02x?}", data)
+        data.iter().map(|b| format!("{:02x}", b)).collect::<String>()
     };
 
+    native_log("DEBUG", &format!("extract_dns_info: FALLBACK domain={} key_len={}", domain, key.len()));
     (domain, key)
+}
+
+/// Rewrite every TTL field in a DNS response wire message to 0.
+///
+/// When the proxy returns a response to Android with TTL > 0, Android's own
+/// DNS resolver caches the result and serves subsequent queries itself —
+/// bypassing the proxy entirely, so the proxy cache never gets a chance to hit.
+///
+/// By zeroing all TTLs in the response we hand back to Android, we tell Android
+/// "this answer expires immediately" — forcing it to ask the proxy again on the
+/// next lookup. The proxy then serves the answer from its own cache (which uses
+/// the real TTL from the DoH server), so latency stays near zero for cached
+/// entries while Android never suppresses queries.
+///
+/// DNS wire format (RFC 1035 §4.1):
+///   Header   (12 bytes)
+///   Questions (variable — skip by parsing label sequences)
+///   Answers / Authority / Additional records:
+///     NAME    (label sequence or pointer)
+///     TYPE    (2 bytes)
+///     CLASS   (2 bytes)
+///     TTL     (4 bytes)  ← we zero these
+///     RDLENGTH (2 bytes)
+///     RDATA   (RDLENGTH bytes)
+fn zero_out_ttls(data: &mut Vec<u8>) {
+    if data.len() < 12 { return; }
+
+    let ancount = u16::from_be_bytes([data[6], data[7]]) as usize;
+    let nscount = u16::from_be_bytes([data[8], data[9]]) as usize;
+    let arcount = u16::from_be_bytes([data[10], data[11]]) as usize;
+    let total_rr = ancount + nscount + arcount;
+
+    if total_rr == 0 { return; }
+
+    let qdcount = u16::from_be_bytes([data[4], data[5]]) as usize;
+    let mut pos = 12;
+
+    // Skip question section
+    for _ in 0..qdcount {
+        // Skip QNAME label sequence
+        while pos < data.len() {
+            let len = data[pos] as usize;
+            if len == 0 { pos += 1; break; }
+            // Compression pointer (top 2 bits = 11)?
+            if (data[pos] & 0xC0) == 0xC0 { pos += 2; break; }
+            pos += 1 + len;
+        }
+        pos += 4; // QTYPE + QCLASS
+    }
+
+    // Walk resource records and zero each TTL
+    for _ in 0..total_rr {
+        if pos >= data.len() { break; }
+        // Skip NAME (label sequence or compression pointer)
+        loop {
+            if pos >= data.len() { return; }
+            let len = data[pos] as usize;
+            if len == 0 { pos += 1; break; }
+            if (data[pos] & 0xC0) == 0xC0 { pos += 2; break; }
+            pos += 1 + len;
+        }
+        // Need TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes
+        if pos + 10 > data.len() { break; }
+        pos += 4; // skip TYPE + CLASS
+        // Zero the 4-byte TTL
+        data[pos]     = 0;
+        data[pos + 1] = 0;
+        data[pos + 2] = 0;
+        data[pos + 3] = 0;
+        pos += 4; // skip TTL
+        let rdlength = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2 + rdlength; // skip RDLENGTH + RDATA
+    }
 }
 
 async fn forward_to_doh(
@@ -884,8 +1195,9 @@ async fn forward_to_doh(
     data: Bytes,
     stats: Arc<Stats>,
     cache: DnsCache,
+    in_flight: InFlight,
     cache_ttl_default: u64,
-    exclude_domain: Option<String>,
+    exclude_suffixes: Arc<Vec<String>>,
 ) -> Result<Bytes> {
     if data.len() < 12 {
         return Err(anyhow::anyhow!("DNS message too short"));
@@ -893,53 +1205,95 @@ async fn forward_to_doh(
 
     let original_id = [data[0], data[1]];
     let (domain, cache_key) = extract_dns_info(&data);
-    let should_cache = if let Some(ref exclude) = exclude_domain {
-        !domain.eq_ignore_ascii_case(exclude)
-    } else {
-        true
-    };
-    
-    // 1. Check Cache
+    if domain == "unknown" {
+        stats.malformed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Suffix-based exclusion: skip caching for any domain whose lowercase
+    // representation ends with one of the configured suffixes.
+    let domain_lc = domain.to_lowercase();
+    let should_cache = exclude_suffixes.is_empty() || !exclude_suffixes.iter().any(|suffix| {
+        domain_lc == *suffix || domain_lc.ends_with(&format!(".{}", suffix))
+    });
+
+    // ── 1. Cache lookup ──────────────────────────────────────────────────────
     if should_cache {
-        if let Some((cached_resp, expiry)) = cache.get(&cache_key).await {
-            if Instant::now() < expiry {
-                let remaining = expiry.duration_since(Instant::now()).as_secs();
-                let mut resp = vec![0u8; cached_resp.len()];
-                resp.copy_from_slice(&cached_resp);
-                // Restore original ID
+        if let Some(cached_bytes) = cache.get(&cache_key) {
+            let mut resp = cached_bytes.to_vec();
+            if resp.len() >= 2 {
                 resp[0] = original_id[0];
                 resp[1] = original_id[1];
-                
-                stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                add_query_log(domain, format!("OK (Cache, TTL {})", remaining));
-                return Ok(Bytes::from(resp));
-            } else {
-                cache.invalidate(&cache_key).await;
+            }
+            // Zero TTLs so Android's system resolver doesn't cache this
+            // and is forced to ask the proxy again next time (proxy serves
+            // from its own cache instantly, so latency stays near zero).
+            zero_out_ttls(&mut resp);
+            stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+            native_log("DEBUG", &format!("cache HIT: key={}", cache_key));
+            add_query_log(domain, "OK (Cache)".into());
+            return Ok(Bytes::from(resp));
+        } else {
+            stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // ── 2. In-flight deduplication ───────────────────────────────────────────
+    // If another task is already fetching the same key, wait for its result
+    // instead of firing a duplicate DoH request.
+    if should_cache {
+        match in_flight.register(&cache_key) {
+            Err(mut rx) => {
+                // We are a waiter — block until the owner completes
+                native_log("DEBUG", &format!("in-flight WAIT: key={}", cache_key));
+                match rx.recv().await {
+                    Ok(Some(response_bytes)) => {
+                        // Owner succeeded — patch our transaction ID and return
+                        let mut resp = response_bytes.to_vec();
+                        if resp.len() >= 2 {
+                            resp[0] = original_id[0];
+                            resp[1] = original_id[1];
+                        }
+                        zero_out_ttls(&mut resp);
+                        stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                        native_log("DEBUG", &format!("in-flight HIT: key={}", cache_key));
+                        add_query_log(domain, "OK (Cache)".into());
+                        return Ok(Bytes::from(resp));
+                    }
+                    // Owner failed or channel lagged — fall through to fetch ourselves
+                    Ok(None) | Err(_) => {
+                        native_log("DEBUG", &format!("in-flight MISS (owner failed): key={}", cache_key));
+                    }
+                }
+            }
+            Ok(tx) => {
+                // We are the owner — fetch below, then broadcast result
+                // `tx` is kept alive until we call in_flight.complete()
+                let _ = tx; // suppress unused warning; ownership held until complete()
             }
         }
     }
 
-    // Increment HTTPS counter only if not served from cache
+    // ── 3. Forward to DoH resolver ───────────────────────────────────────────
     stats.queries_https.fetch_add(1, Ordering::Relaxed);
 
-    // RFC 8484: The DNS message ID MUST be 0 in every DNS request.
+    // RFC 8484 §4.1 — transaction ID MUST be 0 in DoH requests.
     let mut request_data = data.to_vec();
     request_data[0] = 0;
     request_data[1] = 0;
+    let request_bytes = Bytes::from(request_data);
 
-    let start = std::time::Instant::now();
+    let start = Instant::now();
+    let mut last_err: Option<anyhow::Error> = None;
 
-    // Implement retries for robustness
-    let mut last_err = None;
-    for attempt in 0..3 {
+    for attempt in 0..3u64 {
         if attempt > 0 {
-            tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
+            tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
         }
         let resp = client
             .post(&*resolver_url)
             .header("content-type", "application/dns-message")
             .header("accept", "application/dns-message")
-            .body(request_data.clone())
+            .body(request_bytes.clone())
             .send()
             .await;
 
@@ -956,26 +1310,42 @@ async fn forward_to_doh(
                 stats.total_latency.fetch_add(latency, Ordering::Relaxed);
                 stats.latency_count.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain.clone(), format!("OK ({}ms, v{:?}, att {})", latency, version, attempt + 1));
-                
-                // 2. Update Cache with TTL extraction
+
+                // ── 4. Insert into cache & broadcast to waiters ───────────────
                 if should_cache && bytes.len() > 2 {
-                    let mut ttl = cache_ttl_default; // Default TTL from config
-                    if let Ok(msg) = Message::from_vec(&bytes) {
-                        ttl = msg.answers().iter().map(|a| a.ttl()).min().unwrap_or(cache_ttl_default as u32).into();
-                        if ttl < 10 { ttl = 10; }
-                        if ttl > 3600 { ttl = 3600; }
-                    }
-                    let expiry = Instant::now() + Duration::from_secs(ttl);
-                    cache.insert(cache_key, (bytes.clone(), expiry)).await;
+                    let ttl = if let Ok(msg) = Message::from_vec(&bytes) {
+                        // Positive response: use minimum answer TTL
+                        let ans_ttl = msg.answers().iter()
+                            .map(|a| a.ttl() as u64)
+                            .min();
+                        // Negative response (NXDOMAIN / NODATA): use SOA minimum TTL
+                        // from the authority section so we cache "this doesn't exist"
+                        // correctly instead of always fetching it from DoH.
+                        let soa_ttl = msg.name_servers().iter()
+                            .map(|a| a.ttl() as u64)
+                            .min();
+                        ans_ttl.or(soa_ttl).unwrap_or(cache_ttl_default).clamp(1, 3600)
+                    } else {
+                        cache_ttl_default.clamp(1, 3600)
+                    };
+                    // Store with ID=0 (as received from DoH) — callers patch their own ID
+                    cache.insert(cache_key.clone(), bytes.clone(), ttl);
+                    native_log("DEBUG", &format!("cache INSERT: key={} ttl={}s", cache_key, ttl));
+                    // Broadcast to any waiters (send the ID=0 bytes; each waiter patches its own ID)
+                    in_flight.complete(&cache_key, Some(bytes.clone()));
+                } else if should_cache {
+                    // Response too short to cache — unblock waiters with failure
+                    in_flight.complete(&cache_key, None);
                 }
 
-                // Restore original ID in the response
+                // Restore original transaction ID before returning to caller,
+                // then zero out TTLs so Android doesn't cache the response itself.
                 let mut final_resp = bytes.to_vec();
                 if final_resp.len() >= 2 {
                     final_resp[0] = original_id[0];
                     final_resp[1] = original_id[1];
                 }
-
+                zero_out_ttls(&mut final_resp);
                 return Ok(Bytes::from(final_resp));
             }
             Err(e) => {
@@ -984,16 +1354,23 @@ async fn forward_to_doh(
         }
     }
 
-    let err_msg = if let Some(e) = last_err.as_ref() {
-        let mut msg = e.to_string();
-        if msg.contains("connection closed") || msg.contains("broken pipe") {
-            msg = format!("Conn Closed: {}", msg);
-        } else if msg.contains("timed out") {
-            msg = format!("Timeout: {}", msg);
+    // All attempts failed — unblock any waiters
+    if should_cache {
+        in_flight.complete(&cache_key, None);
+    }
+
+    let err_msg = match last_err.as_ref() {
+        Some(e) => {
+            let s = e.to_string();
+            if s.contains("connection closed") || s.contains("broken pipe") {
+                format!("Conn Closed: {}", s)
+            } else if s.contains("timed out") {
+                format!("Timeout: {}", s)
+            } else {
+                s
+            }
         }
-        msg
-    } else {
-        "Unknown Error".to_string()
+        None => "Unknown Error".into(),
     };
 
     add_query_log(domain, format!("Error: {}", err_msg));
