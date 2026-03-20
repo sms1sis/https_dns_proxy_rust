@@ -46,8 +46,10 @@ class ProxyService : VpnService() {
         const val NOTIFICATION_ID = 1
         private const val TAG = "SafeDNS"
 
+        // Tracks whether the VPN layer (VpnService / packet forwarding) is active.
+        // Distinct from isProxyRunning() which reflects the Rust backend state.
         @Volatile
-        var isProxyRunning = false
+        var isVpnActive = false
             private set
 
         @JvmStatic
@@ -62,6 +64,10 @@ class ProxyService : VpnService() {
         external fun clearCache()
         @JvmStatic
         external fun clearLogs()
+        /// Returns true while run_proxy is executing on the Rust side.
+        /// Use this to wait for a clean shutdown before calling startProxy() again.
+        @JvmStatic
+        external fun isProxyRunning(): Boolean
 
         @JvmStatic
         fun nativeLog(level: String, tag: String, message: String) {
@@ -90,7 +96,7 @@ class ProxyService : VpnService() {
         tcpLimit: Int,
         pollInterval: Long,
         useHttp3: Boolean,
-        excludeDomain: String
+        excludeSuffixes: String  // comma-separated suffixes, e.g. "every1dns.net"
     ): Int
     private external fun stopProxy()
 
@@ -117,7 +123,7 @@ class ProxyService : VpnService() {
         }
 
         // Start foreground immediately to prevent ANR/Crash
-        isProxyRunning = true
+        isVpnActive = true
         startForegroundServiceNotification()
 
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -149,19 +155,31 @@ class ProxyService : VpnService() {
         val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", -1L).takeIf { it != null && it != -1L }
             ?: prefs.getString("heartbeat_interval", "10")?.toLongOrNull() ?: 10L
 
+        // Comma-separated cache exclusion suffixes — always exclude every1dns.net heartbeat domains
+        val excludeSuffixes = intent?.getStringExtra("excludeSuffixes") ?: "every1dns.net"
+        val finalExclusions = if (heartbeatEnabled && heartbeatDomain.isNotBlank()) {
+            if (excludeSuffixes.contains(heartbeatDomain)) excludeSuffixes else "$excludeSuffixes,$heartbeatDomain"
+        } else {
+            excludeSuffixes
+        }
+
         val excludedApps = prefs.getStringSet("excluded_apps", emptySet()) ?: emptySet()
 
-        if (BuildConfig.DEBUG) Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl")
+        if (BuildConfig.DEBUG) Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl, exclude=$finalExclusions")
 
         if (vpnInterface != null) {
             val configChanged = runningPort != listenPort || runningUrl != resolverUrl || 
                                runningBootstrap != bootstrapDns || runningCacheTtl != cacheTtl ||
                                runningTcpLimit != tcpLimit || runningPollInterval != pollInterval ||
                                runningHttp3 != useHttp3 || runningHeartbeatDomain != heartbeatDomain ||
-                               runningExcludedApps != excludedApps
+                               runningExcludedApps != excludedApps ||
+                               // heartbeatEnabled toggle must also trigger a backend restart
+                               // so the heartbeat loop starts/stops correctly
+                               (heartbeatEnabled != (heartbeatJob != null))
             
             if (configChanged) {
                 if (BuildConfig.DEBUG) Log.d(TAG, "Dynamic config change detected. Restarting backend...")
+                stopHeartbeat()
                 stopProxy()
                 
                 runningPort = listenPort
@@ -175,9 +193,16 @@ class ProxyService : VpnService() {
                 runningExcludedApps = excludedApps
                 
                 serviceScope.launch {
-                    delay(1000)
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
-                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
+                    // Poll until the old run_proxy has fully released the port
+                    // (or give up after 3 s). A fixed 1 s delay was not reliable
+                    // on slower devices and caused port-already-in-use crashes.
+                    var waited = 0
+                    while (isProxyRunning() && waited < 3000) {
+                        delay(100)
+                        waited += 100
+                    }
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort (waited ${waited}ms for shutdown)")
+                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, finalExclusions)
                     if (BuildConfig.DEBUG) Log.d(TAG, "Backend proxy initialized (result: $res)")
                     
                     if (heartbeatEnabled) {
@@ -209,7 +234,7 @@ class ProxyService : VpnService() {
 
         serviceScope.launch {
             if (BuildConfig.DEBUG) Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
-            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
+            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, finalExclusions)
         }
 
         try {
@@ -268,11 +293,14 @@ class ProxyService : VpnService() {
         currentHeartbeatDomain = domain
         heartbeatJob = serviceScope.launch {
             val socket = DatagramSocket()
+            // Protect the socket so heartbeat packets go directly to the OS network
+            // stack and are not re-intercepted by our own VPN tunnel.
+            protect(socket)
             val address = InetAddress.getByName("127.0.0.1")
             val query = constructDnsQuery(domain)
             if (BuildConfig.DEBUG) Log.d(TAG, "Starting heartbeat loop for $domain on port $port")
             try {
-                while (isActive && isProxyRunning && currentHeartbeatDomain == domain) {
+                while (isActive && isVpnActive && currentHeartbeatDomain == domain) {
                     val packet = DatagramPacket(query, query.size, address, port)
                     socket.send(packet)
                     if (BuildConfig.DEBUG) Log.d(TAG, "Sent heartbeat ping to localhost:$port") 
@@ -314,7 +342,7 @@ class ProxyService : VpnService() {
         val proxyAddr = InetAddress.getByName("127.0.0.1")
         try {
             withContext(Dispatchers.IO) {
-                while (isActive && isProxyRunning) {
+                while (isActive && isVpnActive) {
                     val length = inputStream.read(packet.array())
                     if (length > 0) {
                         val data = packet.array().copyOf(length)
@@ -504,7 +532,7 @@ class ProxyService : VpnService() {
     }
 
     private fun handleStop() {
-        isProxyRunning = false
+        isVpnActive = false
         stopHeartbeat()
         stopProxy()
         serviceScope.cancel() 
