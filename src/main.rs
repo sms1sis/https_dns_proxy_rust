@@ -12,8 +12,6 @@ use tracing_subscriber::prelude::*;
 use std::fs::File;
 #[cfg(not(target_os = "android"))]
 use nix::unistd::{User, Group, setuid, setgid};
-#[cfg(not(target_os = "android"))]
-use daemonize::Daemonize;
 
 #[derive(Parser, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -82,10 +80,9 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     cache_ttl: u64,
 
-    /// Comma-separated domain suffixes to exclude from cache (e.g. "every1dns.net,local")
-    /// Suffix match: "every1dns.net" also excludes "uuid.sub.every1dns.net"
-    #[arg(short = 'e', long, default_value = "")]
-    exclude_suffixes: String,
+    /// Optional domain to exclude from cache
+    #[arg(short = 'e', long)]
+    exclude_domain: Option<String>,
 
     /// Print version and exit
     #[arg(short = 'P', long)]
@@ -134,10 +131,24 @@ async fn main() -> Result<()> {
 
     #[cfg(not(target_os = "android"))]
     if args.daemonize {
-        let daemonize = Daemonize::new()
-            .working_directory("/tmp")
-            .umask(0o022);
-        daemonize.start().context("Failed to daemonize")?;
+        // Daemonize using nix (already a dependency) — avoids the unmaintained
+        // `daemonize` crate. Double-fork pattern per POSIX: first fork exits the
+        // parent so the child is adopted by init; setsid() creates a new session
+        // (detaches from the controlling terminal); second fork ensures the daemon
+        // is never a session leader and cannot reacquire a terminal.
+        use nix::unistd::{fork, setsid, ForkResult, chdir};
+        use nix::sys::stat::{umask, Mode};
+        umask(Mode::from_bits_truncate(0o022));
+        match unsafe { fork() }.context("First fork failed")? {
+            ForkResult::Parent { .. } => std::process::exit(0),
+            ForkResult::Child => {}
+        }
+        setsid().context("setsid failed")?;
+        match unsafe { fork() }.context("Second fork failed")? {
+            ForkResult::Parent { .. } => std::process::exit(0),
+            ForkResult::Child => {}
+        }
+        chdir("/tmp").context("chdir failed")?;
     }
 
     // Drop privileges if requested — only available on non-Android targets
@@ -165,11 +176,7 @@ async fn main() -> Result<()> {
         ca_path: args.ca_path,
         statistic_interval: args.statistic_interval,
         cache_ttl: args.cache_ttl,
-        exclude_suffixes: args.exclude_suffixes
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect(),
+        exclude_domain: args.exclude_domain,
     };
 
     let stats = Arc::new(Stats::new());
