@@ -125,10 +125,10 @@ fn shutdown_native_log() {
 }
 
 #[cfg(feature = "jni")]
-static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+static GLOBAL_STATS: LazyLock<std::sync::RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 #[cfg(feature = "jni")]
-static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
+static GLOBAL_CACHE: LazyLock<std::sync::RwLock<Option<DnsCache>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
 
@@ -440,7 +440,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     #[cfg(feature = "jni")]
     {
-        let mut w = GLOBAL_CACHE.write().await;
+        let mut w = GLOBAL_CACHE.write().unwrap();
         *w = Some(cache.clone());
     }
 
@@ -692,10 +692,10 @@ pub mod jni_api {
         }
 
         let stats = Arc::new(Stats::new());
-        RUNTIME.block_on(async {
-            let mut w = GLOBAL_STATS.write().await;
+        {
+            let mut w = GLOBAL_STATS.write().unwrap();
             *w = Some(stats.clone());
-        });
+        }
 
         let config_clone = config.clone();
         let stats_clone = stats.clone();
@@ -723,17 +723,12 @@ pub mod jni_api {
         env: JNIEnv,
         _class: JClass,
     ) -> jni::sys::jintArray {
-        let stats_opt = RUNTIME.block_on(async {
-            GLOBAL_STATS.read().await.clone()
-        });
+        let stats_opt = GLOBAL_STATS.read().unwrap().clone();
 
-        let cache_count = RUNTIME.block_on(async {
-            if let Some(cache) = &*GLOBAL_CACHE.read().await {
-                cache.entry_count()
-            } else {
-                0usize
-            }
-        });
+        let cache_count = GLOBAL_CACHE.read().unwrap()
+            .as_ref()
+            .map(|c| c.entry_count())
+            .unwrap_or(0);
 
         // Index layout (must match StatsScreen on the Kotlin side):
         //   [0] udp queries
@@ -782,9 +777,7 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) {
-        if let Some(stats) = RUNTIME.block_on(async {
-            GLOBAL_STATS.read().await.clone()
-        }) {
+        if let Some(stats) = GLOBAL_STATS.read().unwrap().clone() {
             stats.queries_udp.store(0, Ordering::Relaxed);
             stats.queries_tcp.store(0, Ordering::Relaxed);
             stats.queries_https.store(0, Ordering::Relaxed);
@@ -881,12 +874,10 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) {
-        RUNTIME.block_on(async {
-            if let Some(cache) = &*GLOBAL_CACHE.read().await {
-                cache.invalidate_all();
-                native_log("INFO", "DNS Cache cleared via JNI");
-            }
-        });
+        if let Some(cache) = GLOBAL_CACHE.read().unwrap().as_ref() {
+            cache.invalidate_all();
+            native_log("INFO", "DNS Cache cleared via JNI");
+        }
     }
 }
 
