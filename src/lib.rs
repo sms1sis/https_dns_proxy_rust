@@ -12,14 +12,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
 use bytes::Bytes;
+#[cfg(feature = "jni")]
+use jni::errors::LogErrorAndDefault;
+#[cfg(feature = "jni")]
+use jni::{jni_sig, jni_str};
 // No moka — plain std HashMap with manual TTL via Instant.
 // Completely avoids moka's background-thread eviction issues on Android.
+#[cfg(feature = "jni")]
 use jni::JavaVM;
 use hickory_resolver::proto::op::Message;
-use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy};
-use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy, CLOUDFLARE, GOOGLE};
+use hickory_resolver::config::ConnectionConfig;
 use hickory_resolver::TokioResolver;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use std::fs::File;
 use std::io::Read;
 
@@ -82,21 +87,24 @@ static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock:
                 }
 
                 // Forward to Kotlin via JNI — flat closure, errors short-circuit cleanly.
+                #[cfg(feature = "jni")]
                 let _ = (|| -> Option<()> {
                     let jvm_lock   = JVM.read().ok()?;
                     let jvm        = jvm_lock.as_ref()?;
                     let class_lock = PROXY_SERVICE_CLASS.read().ok()?;
                     let class_ref  = class_lock.as_ref()?;
-                    let mut env    = jvm.attach_current_thread().ok()?;
-                    let level_j    = env.new_string(&level).ok()?;
-                    let tag_j      = env.new_string("SafeDNS-Native").ok()?;
-                    let msg_j      = env.new_string(&msg).ok()?;
-                    env.call_static_method(
-                        class_ref,
-                        "nativeLog",
-                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                        &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
-                    ).ok()?;
+                    let _ = jvm.attach_current_thread(|env| {
+                        let level_j    = env.new_string(&level)?;
+                        let tag_j      = env.new_string("SafeDNS-Native")?;
+                        let msg_j      = env.new_string(&msg)?;
+                        env.call_static_method(
+                            class_ref,
+                            jni_str!("nativeLog"),
+                            jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                            &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                        )?;
+                        Ok::<(), jni::errors::Error>(())
+                    }).ok()?;
                     Some(())
                 })();
             }
@@ -124,16 +132,18 @@ fn shutdown_native_log() {
     let _ = NATIVE_LOG_SENDER.send(NativeLog::Shutdown);
 }
 
-#[cfg(feature = "jni")]
-static GLOBAL_STATS: LazyLock<std::sync::RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+
 
 #[cfg(feature = "jni")]
 static GLOBAL_CACHE: LazyLock<std::sync::RwLock<Option<DnsCache>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
+
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(feature = "jni")]
 static JVM: LazyLock<std::sync::RwLock<Option<JavaVM>>> = LazyLock::new(|| std::sync::RwLock::new(None));
-static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::GlobalRef>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+#[cfg(feature = "jni")]
+static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::Global<jni::objects::JClass>>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 fn add_query_log(domain: String, status: String) {
     let _ = LOG_SENDER.send(LogMessage { domain, status });
@@ -240,12 +250,7 @@ impl DnsCache {
         })
     }
 
-    fn entry_count(&self) -> usize {
-        let now = Instant::now();
-        self.shards.iter()
-            .map(|s| s.lock().unwrap().values().filter(|v| v.expires > now).count())
-            .sum()
-    }
+
 
     fn invalidate_all(&self) {
         for shard in self.shards.iter() {
@@ -579,13 +584,10 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 #[cfg(feature = "jni")]
 pub mod jni_api {
     use super::*;
-    use jni::JNIEnv;
-    use jni::objects::{JClass, JObject, JString};
-    use jni::sys::{jint, jboolean};
-    use tokio::runtime::Runtime;
+    use jni::objects::JClass;
+    use jni::sys::jboolean;
     use tokio_util::sync::CancellationToken;
 
-    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap());
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
     // Tracks whether run_proxy is actively running, so Kotlin can poll before
@@ -594,246 +596,39 @@ pub mod jni_api {
         std::sync::atomic::AtomicBool::new(false);
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_initLogger(
-        mut env: JNIEnv,
-        _class: JClass,
-        _context: JObject,
-    ) {
-         let filter = if cfg!(debug_assertions) {
-             log::LevelFilter::Debug
-         } else {
-             log::LevelFilter::Info
-         };
-
-         android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(filter)
-                .with_tag("SafeDNS")
-         );
-         
-         if let Ok(jvm) = env.get_java_vm() {
-             if let Ok(mut w) = JVM.write() {
-                 *w = Some(jvm);
-             }
-         }
-
-         if let Ok(class) = env.find_class("io/github/SafeDNS/ProxyService") {
-             if let Ok(global_ref) = env.new_global_ref(class) {
-                 if let Ok(mut w) = PROXY_SERVICE_CLASS.write() {
-                     *w = Some(global_ref);
-                 }
-             }
-         }
-
-         #[cfg(target_os = "android")]
-         rustls_platform_verifier::android::init_hosted(&mut env, _context).ok();
-         native_log("INFO", "Logger, JVM and Global Class Ref initialized");
-    }
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_startProxy(
-        mut env: JNIEnv,
-        _class: JClass,
-        listen_addr: JString,
-        listen_port: jint,
-        resolver_url: JString,
-        bootstrap_dns: JString,
-        allow_ipv6: jni::sys::jboolean,
-        cache_ttl: jni::sys::jlong,
-        tcp_limit: jint,
-        poll_interval: jni::sys::jlong,
-        use_http3: jni::sys::jboolean,
-        // Comma-separated list of domain suffixes to exclude from caching.
-        // e.g. "every1dns.net,local" blocks all subdomains of those suffixes.
-        // Pass "" to disable exclusions entirely.
-        exclude_suffixes: JString,
-    ) -> jint {
-        let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
-        let resolver_url: String = env.get_string(&resolver_url).unwrap().into();
-        let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
-        let exclude_raw: String = env.get_string(&exclude_suffixes).unwrap().into();
-        let allow_ipv6 = allow_ipv6 != 0;
-        let use_http3 = use_http3 != 0;
-
-        // Parse comma-separated suffixes, strip whitespace, drop empties
-        let exclude_suffixes: Vec<String> = exclude_raw
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        native_log("INFO", &format!("startProxy: addr={}, port={}, resolver={}, exclude={:?}", listen_addr, listen_port, resolver_url, exclude_suffixes));
-
-        let config = Config {
-            listen_addr,
-            listen_port: listen_port as u16,
-            resolver_url,
-            bootstrap_dns,
-            allow_ipv6,
-            tcp_client_limit: tcp_limit as usize,
-            polling_interval: poll_interval as u64,
-            force_ipv4: !allow_ipv6,
-            proxy_server: None,
-            source_addr: None,
-            http11: false,
-            http3: use_http3,
-            max_idle_time: 120,
-            conn_loss_time: 10,
-            ca_path: None,
-            statistic_interval: 0,
-            cache_ttl: cache_ttl as u64,
-            exclude_suffixes,
-        };
-
-        let token = CancellationToken::new();
-        let cloned_token = token.clone();
-        {
-            let mut lock = CANCELLATION_TOKEN.lock().unwrap();
-            *lock = Some(token);
-        }
-
-        let stats = Arc::new(Stats::new());
-        {
-            let mut w = GLOBAL_STATS.write().unwrap();
-            *w = Some(stats.clone());
-        }
-
-        let config_clone = config.clone();
-        let stats_clone = stats.clone();
-        
-        RUNTIME.spawn(async move {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            
-            tokio::spawn(async move {
-                cloned_token.cancelled().await;
-                let _ = tx.send(());
-            });
-
-            IS_PROXY_RUNNING.store(true, Ordering::SeqCst);
-            if let Err(e) = run_proxy(config_clone, stats_clone, rx).await {
-                native_log("ERROR", &format!("Proxy error: {}", e));
-            }
-            IS_PROXY_RUNNING.store(false, Ordering::SeqCst);
-        });
-
-        0
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getStats(
-        env: JNIEnv,
-        _class: JClass,
-    ) -> jni::sys::jintArray {
-        let stats_opt = GLOBAL_STATS.read().unwrap().clone();
-
-        let cache_count = GLOBAL_CACHE.read().unwrap()
-            .as_ref()
-            .map(|c| c.entry_count())
-            .unwrap_or(0);
-
-        // Index layout (must match StatsScreen on the Kotlin side):
-        //   [0] udp queries
-        //   [1] tcp queries
-        //   [2] malformed queries
-        //   [3] total queries (udp + tcp)
-        //   [4] https (DoH) requests forwarded
-        //   [5] cache hits
-        //   [6] errors
-        //   [7] avg latency (ms)
-        //   [8] current cache entry count
-        //   [9] cache misses
-        let mut values = [0i32; 10];
-        if let Some(stats) = stats_opt {
-            let udp    = stats.queries_udp.load(Ordering::Relaxed);
-            let tcp    = stats.queries_tcp.load(Ordering::Relaxed);
-            let hits   = stats.cache_hits.load(Ordering::Relaxed);
-            let misses = stats.cache_misses.load(Ordering::Relaxed);
-            let https  = stats.queries_https.load(Ordering::Relaxed);
-            let errs   = stats.errors.load(Ordering::Relaxed);
-            let t_lat  = stats.total_latency.load(Ordering::Relaxed);
-            let count  = stats.latency_count.load(Ordering::Relaxed);
-            let avg_lat = if count > 0 { (t_lat / count) as i32 } else { 0 };
-
-            native_log("DEBUG", &format!("JNI getStats: udp={}, tcp={}, hits={}, misses={}, https={}, err={}, lat={}ms, cache_size={}", udp, tcp, hits, misses, https, errs, avg_lat, cache_count));
-
-            values[0] = udp as i32;
-            values[1] = tcp as i32;
-            values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
-            values[3] = (udp + tcp) as i32;
-            values[4] = https as i32;
-            values[5] = hits as i32;
-            values[6] = errs as i32;
-            values[7] = avg_lat;
-            values[8] = cache_count as i32;
-            values[9] = misses as i32;
-        }
-
-        let array = env.new_int_array(10).unwrap();
-        env.set_int_array_region(&array, 0, &values).unwrap();
-        array.into_raw()
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearStats(
-        _env: JNIEnv,
-        _class: JClass,
-    ) {
-        if let Some(stats) = GLOBAL_STATS.read().unwrap().clone() {
-            stats.queries_udp.store(0, Ordering::Relaxed);
-            stats.queries_tcp.store(0, Ordering::Relaxed);
-            stats.queries_https.store(0, Ordering::Relaxed);
-            stats.cache_hits.store(0, Ordering::Relaxed);
-            stats.cache_misses.store(0, Ordering::Relaxed);
-            stats.malformed.store(0, Ordering::Relaxed);
-            stats.errors.store(0, Ordering::Relaxed);
-            stats.total_latency.store(0, Ordering::Relaxed);
-            stats.latency_count.store(0, Ordering::Relaxed);
-            native_log("INFO", "Traffic statistics cleared");
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLatency(
-        _env: JNIEnv,
-        _class: JClass,
-    ) -> jint {
-        let lat = LAST_LATENCY.load(Ordering::Relaxed) as jint;
-        if lat > 0 {
-            native_log("DEBUG", &format!("JNI getLatency: {}ms", lat));
-        }
-        lat
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLogs(
-        mut env: JNIEnv,
+        mut env: jni::EnvUnowned,
         _class: JClass,
     ) -> jni::sys::jobjectArray {
-        let logs = QUERY_LOGS.lock().unwrap();
-        let list: Vec<String> = logs.iter().cloned().collect();
+        let logs: Vec<String> = {
+            let queue = QUERY_LOGS.lock().unwrap();
+            queue.iter().cloned().collect()
+        };
 
-        let cls = env.find_class("java/lang/String").unwrap();
-        let initial = env.new_string("").unwrap();
-        // In jni 0.22 new_object_array takes the initial element as impl Into<JObject<'_>>.
-        // We pass JObject::null() as the initial fill value and set each element below.
-        let array = env.new_object_array(
-            list.len() as jni::sys::jsize,
-            &cls,
-            jni::objects::JObject::null(),
-        ).unwrap();
-        drop(initial); // no longer needed
-
-        for (i, log) in list.iter().enumerate() {
-            let s = env.new_string(log).unwrap();
-            // set_object_array_element accepts impl AsRef<JObject> — JString derefs to JObject.
-            env.set_object_array_element(&array, i as jni::sys::jsize, &s).unwrap();
+        if logs.is_empty() {
+            return std::ptr::null_mut();
         }
 
-        array.into_raw()
+        env.with_env_no_catch(|env| {
+            let cls = env.find_class(jni_str!("java/lang/String"))?;
+            let array = env.new_object_array(
+                logs.len() as jni::sys::jsize,
+                &cls,
+                jni::objects::JObject::null()
+            )?;
+
+            for (i, log) in logs.iter().enumerate() {
+                let s = env.new_string(log)?;
+                array.set_element(env, i, &s)?;
+            }
+
+            Ok::<_, jni::errors::Error>(array.into_raw())
+        }).resolve::<LogErrorAndDefault>()
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearLogs(
-        _env: JNIEnv,
+        mut _env: jni::EnvUnowned,
         _class: JClass,
     ) {
         let mut logs = QUERY_LOGS.lock().unwrap();
@@ -842,7 +637,7 @@ pub mod jni_api {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_stopProxy(
-        _env: JNIEnv,
+        mut _env: jni::EnvUnowned,
         _class: JClass,
     ) {
         let mut lock = CANCELLATION_TOKEN.lock().unwrap();
@@ -863,7 +658,7 @@ pub mod jni_api {
     ///   startProxy(...)
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_isProxyRunning(
-        _env: JNIEnv,
+        mut _env: jni::EnvUnowned,
         _class: JClass,
     ) -> jboolean {
         IS_PROXY_RUNNING.load(Ordering::SeqCst) as jboolean
@@ -871,7 +666,7 @@ pub mod jni_api {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearCache(
-        _env: JNIEnv,
+        mut _env: jni::EnvUnowned,
         _class: JClass,
     ) {
         if let Some(cache) = GLOBAL_CACHE.read().unwrap().as_ref() {
@@ -897,10 +692,13 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
 
     native_log("INFO", &format!("resolve_bootstrap: Using bootstrap servers: {:?}", servers));
 
-    let mut config = ResolverConfig::new();
+    let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
     for s in servers {
-        config.add_name_server(NameServerConfig::new(s, Protocol::Udp));
-        config.add_name_server(NameServerConfig::new(s, Protocol::Tcp));
+        config.add_name_server(NameServerConfig::new(
+            s.ip(), 
+            true, 
+            vec![ConnectionConfig::udp(), ConnectionConfig::tcp()]
+        ));
     }
 
     let mut opts = ResolverOpts::default();
@@ -910,12 +708,12 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
         LookupIpStrategy::Ipv4Only
     };
 
-    let resolver = TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
+    let resolver = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
         .build();
     
     native_log("INFO", &format!("resolve_bootstrap: Querying Hickory for {}...", domain));
-    let ips = match resolver.lookup_ip(domain).await {
+    let ips = match resolver.as_ref().map_err(|e| anyhow::anyhow!("Failed to build resolver: {}", e))?.lookup_ip(domain).await {
         Ok(ips) => {
             native_log("INFO", &format!("resolve_bootstrap: Hickory resolved {} to {:?}", domain, ips));
             ips
@@ -926,13 +724,15 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
             opts4.ip_strategy = LookupIpStrategy::Ipv4Only;
             
             // Try Cloudflare AND Google as fallbacks
-            let mut fallback_config = ResolverConfig::cloudflare();
-            fallback_config.add_name_server(NameServerConfig::new("8.8.8.8:53".parse()?, Protocol::Udp));
-            fallback_config.add_name_server(NameServerConfig::new("8.8.4.4:53".parse()?, Protocol::Udp));
+            let mut fallback_config = ResolverConfig::udp_and_tcp(&CLOUDFLARE);
+            for ns in GOOGLE.udp_and_tcp() {
+                fallback_config.add_name_server(ns);
+            }
 
-            let resolver4 = TokioResolver::builder_with_config(fallback_config, TokioConnectionProvider::default())
+            let resolver4 = TokioResolver::builder_with_config(fallback_config, TokioRuntimeProvider::default())
                 .with_options(opts4)
-                .build();
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build fallback resolver: {}", e))?;
             
             native_log("INFO", "resolve_bootstrap: Querying Hickory (IPv4 fallback) for domain...");
             resolver4.lookup_ip(domain).await.context("Failed to resolve DoH provider (IPv4 retry)")?
@@ -952,7 +752,6 @@ fn create_client(config: &Config, resolver: DynamicResolver) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent(format!("SafeDNS/{}", env!("CARGO_PKG_VERSION")))
         .dns_resolver(Arc::new(resolver))
-        .tls_built_in_webpki_certs(true)
         .tcp_nodelay(true)
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(32)
@@ -1062,7 +861,7 @@ async fn handle_tcp_query(
 /// for the same wire content.
 fn extract_dns_info(data: &[u8]) -> (String, String) {
     if let Ok(msg) = Message::from_vec(data) {
-        if let Some(query) = msg.queries().first() {
+        if let Some(query) = msg.queries.first() {
             let name = query.name().to_string();
             // Strip trailing dot for the human-readable domain display.
             let domain = if name.ends_with('.') && name.len() > 1 {
@@ -1306,14 +1105,14 @@ async fn forward_to_doh(
                 if should_cache && bytes.len() > 2 {
                     let ttl = if let Ok(msg) = Message::from_vec(&bytes) {
                         // Positive response: use minimum answer TTL
-                        let ans_ttl = msg.answers().iter()
-                            .map(|a| a.ttl() as u64)
+                        let ans_ttl = msg.answers.iter()
+                            .map(|a| a.ttl as u64)
                             .min();
                         // Negative response (NXDOMAIN / NODATA): use SOA minimum TTL
                         // from the authority section so we cache "this doesn't exist"
                         // correctly instead of always fetching it from DoH.
-                        let soa_ttl = msg.name_servers().iter()
-                            .map(|a| a.ttl() as u64)
+                        let soa_ttl = msg.authorities.iter()
+                            .map(|a| a.ttl as u64)
                             .min();
                         ans_ttl.or(soa_ttl).unwrap_or(cache_ttl_default).clamp(1, 3600)
                     } else {

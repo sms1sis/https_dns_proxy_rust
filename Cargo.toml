@@ -1,6 +1,6 @@
 [package]
 name = "https_dns_proxy_rust"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 authors = ["sms1sis <sadimsajid2004@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -33,18 +33,18 @@ tokio            = { version = "1",      features = ["full"] }
 anyhow           = "1"
 bytes            = "1"
 socket2          = { version = "0.6.3",  features = ["all"] }
-hickory-resolver = "0.25"
+hickory-resolver = "0.26"
 chrono           = { version = "0.4",    default-features = false, features = ["clock", "std"] }
 log              = "0.4"
 
 [dependencies.reqwest]
-version          = "0.12.5"
+version          = "0.13"
 default-features = false
-features         = ["rustls-tls-webpki-roots", "socks", "http2"]
+features         = ["rustls", "socks", "http2"]
 
 # ── JNI / Android (--features jni) ───────────────────────────────────────────
 [dependencies.jni]
-version  = "0.21"
+version  = "0.22"
 optional = true
 
 [dependencies.tokio-util]
@@ -56,7 +56,7 @@ version  = "0.15.1"
 optional = true
 
 [dependencies.rustls-platform-verifier]
-version  = "0.6.2"
+version  = "0.7"
 features = ["jni"]
 optional = true
 
@@ -77,11 +77,11 @@ features = ["env-filter"]
 optional = true
 
 [dependencies.nix]
-version  = "0.31.1"
+version  = "0.31.3"
 features = ["user", "fs", "process"]
 optional = true
 
 # Force rustls-webpki to >=0.103.10 to fix RUSTSEC-2026-0049
 # (CRLs not considered authoritative due to faulty matching logic)
 [dependencies.rustls-webpki]
-version  = "0.103.10"
+version  = "0.103.13"

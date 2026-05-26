@@ -1,10 +1,11 @@
+#![cfg(feature = "cli")]
+
 use clap::Parser;
 use anyhow::{Result, Context};
 use std::sync::Arc;
 use https_dns_proxy_rust::{Config, Stats, run_proxy};
 
 // CLI-only imports
-#[cfg(feature = "cli")]
 use tracing::Level;
 #[cfg(not(target_os = "android"))]
 use tracing_subscriber::prelude::*;
@@ -176,7 +177,9 @@ async fn main() -> Result<()> {
         ca_path: args.ca_path,
         statistic_interval: args.statistic_interval,
         cache_ttl: args.cache_ttl,
-        exclude_domain: args.exclude_domain,
+        exclude_suffixes: args.exclude_domain
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default(),
     };
 
     let stats = Arc::new(Stats::new());

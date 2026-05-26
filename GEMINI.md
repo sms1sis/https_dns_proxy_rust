@@ -9,7 +9,7 @@
 *   **Android App:** Kotlin + Jetpack Compose (Material 3)
 *   **Package Name:** `io.github.SafeDNS`
 
-## Recent Android Updates (v0.6.1)
+## Recent Android Updates (v0.6.2)
 
 *   **Cache Pulse Exclusion:** Prevented the latency pulse (heartbeat) domain from being cached, ensuring real-time latency measurements.
 *   **Heartbeat Reliability:** Fixed a bug where the heartbeat loop would persist in the background even after being disabled in the UI.
