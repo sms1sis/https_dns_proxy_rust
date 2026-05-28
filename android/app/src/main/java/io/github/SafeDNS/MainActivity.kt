@@ -239,7 +239,7 @@ class MainActivity : ComponentActivity() {
                         Log.d("SafeDNS", "UI Latency update: $newLat ms")
                         latency = newLat
                     }
-                    logs = ProxyService.getLogs()
+                    logs = ProxyService.getLogs() ?: emptyArray()
                     stats = ProxyService.getStats()
                 }
                 delay(1000)

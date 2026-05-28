@@ -135,6 +135,8 @@ fn shutdown_native_log() {
 
 
 #[cfg(feature = "jni")]
+static GLOBAL_STATS: LazyLock<std::sync::RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+#[cfg(feature = "jni")]
 static GLOBAL_CACHE: LazyLock<std::sync::RwLock<Option<DnsCache>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 
@@ -251,6 +253,13 @@ impl DnsCache {
     }
 
 
+
+    fn entry_count(&self) -> usize {
+        let now = Instant::now();
+        self.shards.iter()
+            .map(|s| s.lock().unwrap().values().filter(|v| v.expires > now).count())
+            .sum()
+    }
 
     fn invalidate_all(&self) {
         for shard in self.shards.iter() {
@@ -584,10 +593,12 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 #[cfg(feature = "jni")]
 pub mod jni_api {
     use super::*;
-    use jni::objects::JClass;
-    use jni::sys::jboolean;
+    use jni::objects::{JClass, JObject, JString};
+    use jni::sys::{jboolean, jint};
+    use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
 
+    static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().unwrap());
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
     // Tracks whether run_proxy is actively running, so Kotlin can poll before
@@ -596,9 +607,208 @@ pub mod jni_api {
         std::sync::atomic::AtomicBool::new(false);
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLogs(
-        mut env: jni::EnvUnowned,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_initLogger<'local>(
+        mut env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+        context: JObject<'local>,
+    ) {
+        env.with_env(|env| -> Result<_, jni::errors::Error> {
+        let filter = if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        };
+
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(filter)
+                .with_tag("SafeDNS")
+        );
+
+        if let Ok(jvm) = env.get_java_vm() {
+            if let Ok(mut w) = JVM.write() {
+                *w = Some(jvm);
+            }
+        }
+
+        if let Ok(class) = env.find_class(jni_str!("io/github/SafeDNS/ProxyService")) {
+            if let Ok(global_ref) = env.new_global_ref(class) {
+                if let Ok(mut w) = PROXY_SERVICE_CLASS.write() {
+                    *w = Some(global_ref);
+                }
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        rustls_platform_verifier::android::init_with_env(env, context)?;
+
+        native_log("INFO", "Logger, JVM and Global Class Ref initialized");
+        Ok(())
+        }).resolve::<jni::errors::LogErrorAndDefault>();
+
+        #[cfg(not(target_os = "android"))]
+        let _ = context;
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_startProxy<'local>(
+        mut unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+        listen_addr: JString<'local>,
+        listen_port: jint,
+        resolver_url: JString<'local>,
+        bootstrap_dns: JString<'local>,
+        allow_ipv6: jni::sys::jboolean,
+        cache_ttl: jni::sys::jlong,
+        tcp_limit: jint,
+        poll_interval: jni::sys::jlong,
+        use_http3: jni::sys::jboolean,
+        exclude_suffixes: JString<'local>,
+    ) -> jint {
+        unowned_env.with_env(|env| -> Result<jint, jni::errors::Error> {
+        let listen_addr: String = listen_addr.try_to_string(env)?;
+        let resolver_url: String = resolver_url.try_to_string(env)?;
+        let bootstrap_dns: String = bootstrap_dns.try_to_string(env)?;
+        let exclude_raw: String = exclude_suffixes.try_to_string(env)?;
+
+        let exclude_suffixes: Vec<String> = exclude_raw
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        native_log("INFO", &format!("startProxy: addr={}, port={}, resolver={}, exclude={:?}", listen_addr, listen_port, resolver_url, exclude_suffixes));
+
+        let config = Config {
+            listen_addr,
+            listen_port: listen_port as u16,
+            resolver_url,
+            bootstrap_dns,
+            allow_ipv6,
+            tcp_client_limit: tcp_limit as usize,
+            polling_interval: poll_interval as u64,
+            force_ipv4: !allow_ipv6,
+            proxy_server: None,
+            source_addr: None,
+            http11: false,
+            http3: use_http3,
+            max_idle_time: 120,
+            conn_loss_time: 10,
+            ca_path: None,
+            statistic_interval: 0,
+            cache_ttl: cache_ttl as u64,
+            exclude_suffixes,
+        };
+
+        let token = CancellationToken::new();
+        let cloned_token = token.clone();
+        {
+            let mut lock = CANCELLATION_TOKEN.lock().unwrap();
+            *lock = Some(token);
+        }
+
+        let stats = Arc::new(Stats::new());
+        {
+            let mut w = GLOBAL_STATS.write().unwrap();
+            *w = Some(stats.clone());
+        }
+
+        let config_clone = config.clone();
+        let stats_clone = stats.clone();
+
+        RUNTIME.spawn(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            tokio::spawn(async move {
+                cloned_token.cancelled().await;
+                let _ = tx.send(());
+            });
+
+            IS_PROXY_RUNNING.store(true, Ordering::SeqCst);
+            if let Err(e) = run_proxy(config_clone, stats_clone, rx).await {
+                native_log("ERROR", &format!("Proxy error: {}", e));
+            }
+            IS_PROXY_RUNNING.store(false, Ordering::SeqCst);
+        });
+
+        Ok(0)
+        }).resolve::<jni::errors::LogErrorAndDefault>()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getStats<'local>(
+        mut unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+    ) -> jni::sys::jintArray {
+        unowned_env.with_env(|env| -> Result<jni::sys::jintArray, jni::errors::Error> {
+        let stats_opt = GLOBAL_STATS.read().unwrap().clone();
+
+        let cache_count = GLOBAL_CACHE.read().unwrap()
+            .as_ref()
+            .map(|c| c.entry_count())
+            .unwrap_or(0);
+
+        let mut values = [0i32; 10];
+        if let Some(stats) = stats_opt {
+            let udp    = stats.queries_udp.load(Ordering::Relaxed);
+            let tcp    = stats.queries_tcp.load(Ordering::Relaxed);
+            let hits   = stats.cache_hits.load(Ordering::Relaxed);
+            let misses = stats.cache_misses.load(Ordering::Relaxed);
+            let https  = stats.queries_https.load(Ordering::Relaxed);
+            let errs   = stats.errors.load(Ordering::Relaxed);
+            let t_lat  = stats.total_latency.load(Ordering::Relaxed);
+            let count  = stats.latency_count.load(Ordering::Relaxed);
+            let avg_lat = if count > 0 { (t_lat / count) as i32 } else { 0 };
+
+            values[0] = udp as i32;
+            values[1] = tcp as i32;
+            values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
+            values[3] = (udp + tcp) as i32;
+            values[4] = https as i32;
+            values[5] = hits as i32;
+            values[6] = errs as i32;
+            values[7] = avg_lat;
+            values[8] = cache_count as i32;
+            values[9] = misses as i32;
+        }
+
+        let array = env.new_int_array(10)?;
+        array.set_region(env, 0, &values)?;
+        Ok(array.into_raw())
+        }).resolve::<jni::errors::LogErrorAndDefault>()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearStats<'local>(
+        mut _env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+    ) {
+        if let Some(stats) = GLOBAL_STATS.read().unwrap().clone() {
+            stats.queries_udp.store(0, Ordering::Relaxed);
+            stats.queries_tcp.store(0, Ordering::Relaxed);
+            stats.queries_https.store(0, Ordering::Relaxed);
+            stats.cache_hits.store(0, Ordering::Relaxed);
+            stats.cache_misses.store(0, Ordering::Relaxed);
+            stats.malformed.store(0, Ordering::Relaxed);
+            stats.errors.store(0, Ordering::Relaxed);
+            stats.total_latency.store(0, Ordering::Relaxed);
+            stats.latency_count.store(0, Ordering::Relaxed);
+            native_log("INFO", "Traffic statistics cleared");
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLatency<'local>(
+        mut _env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+    ) -> jint {
+        LAST_LATENCY.load(Ordering::Relaxed) as jint
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_getLogs<'local>(
+        mut env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) -> jni::sys::jobjectArray {
         let logs: Vec<String> = {
             let queue = QUERY_LOGS.lock().unwrap();
@@ -609,7 +819,7 @@ pub mod jni_api {
             return std::ptr::null_mut();
         }
 
-        env.with_env_no_catch(|env| {
+        env.with_env(|env| {
             let cls = env.find_class(jni_str!("java/lang/String"))?;
             let array = env.new_object_array(
                 logs.len() as jni::sys::jsize,
@@ -627,18 +837,18 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearLogs(
-        mut _env: jni::EnvUnowned,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearLogs<'local>(
+        mut _env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         let mut logs = QUERY_LOGS.lock().unwrap();
         logs.clear();
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_stopProxy(
-        mut _env: jni::EnvUnowned,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_stopProxy<'local>(
+        mut _env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         let mut lock = CANCELLATION_TOKEN.lock().unwrap();
         if let Some(token) = lock.take() {
@@ -657,17 +867,17 @@ pub mod jni_api {
     ///   while (isProxyRunning() && waited < 3000) { delay(100); waited += 100 }
     ///   startProxy(...)
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_isProxyRunning(
-        mut _env: jni::EnvUnowned,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_isProxyRunning<'local>(
+        mut _env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) -> jboolean {
         IS_PROXY_RUNNING.load(Ordering::SeqCst) as jboolean
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearCache(
-        mut _env: jni::EnvUnowned,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_SafeDNS_ProxyService_clearCache<'local>(
+        mut _env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         if let Some(cache) = GLOBAL_CACHE.read().unwrap().as_ref() {
             cache.invalidate_all();

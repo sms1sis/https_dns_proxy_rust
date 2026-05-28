@@ -61,7 +61,7 @@ class ProxyService : VpnService() {
         @JvmStatic
         external fun getLatency(): Int
         @JvmStatic
-        external fun getLogs(): Array<String>
+        external fun getLogs(): Array<String>?
         @JvmStatic
         external fun getStats(): IntArray
         @JvmStatic
