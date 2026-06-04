@@ -240,8 +240,8 @@ class MainActivity : ComponentActivity() {
                         latency = newLat
                     }
                     logs = ProxyService.getLogs() ?: emptyArray()
-                    stats = ProxyService.getStats()
                 }
+                stats = ProxyService.getStats()
                 delay(1000)
             }
         }
