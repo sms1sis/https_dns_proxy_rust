@@ -1041,9 +1041,9 @@ async fn handle_tcp_query(
     stream.read_exact(&mut data).await?;
     let data = Bytes::from(data);
 
-    if extract_dns_info(&data).0 == "unknown" {
-        stats.malformed.fetch_add(1, Ordering::Relaxed);
-    }
+    // Note: malformed-query counting happens inside forward_to_doh (it runs the
+    // same extract_dns_info check) — don't duplicate it here, or every malformed
+    // TCP query gets counted twice while UDP only counts it once.
 
     match forward_to_doh(client, resolver_url, data, stats.clone(), cache, in_flight, cache_ttl_default, exclude_suffixes).await {
         Ok(bytes) => {
